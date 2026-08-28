@@ -13,10 +13,11 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
-// Config del negocio: el mismo documento que ya usa el panel (solo lectura desde el bot)
-const CONFIG_DOC = db.collection("appData").doc("salinas_burger_config");
-// Los pedidos que arma el bot viven en su PROPIA colección, para no pisar el guardado del panel
-const ORDERS_COL = db.collection("orders_whatsapp");
+// Los dos apartados separados que ahora usa el panel
+const MENU_DOC = db.collection("appData").doc("menu");
+const CONFIG_DOC = db.collection("appData").doc("config");
+// Los pedidos confirmados por el bot viven en su propia colección
+const ORDERS_COL = db.collection("pedidos");
 // Estado de la conversación de cada cliente mientras arma su pedido
 const SESSIONS_COL = db.collection("bot_sessions");
 
@@ -73,12 +74,13 @@ app.post("/webhook", async (req, res) => {
 // ============ LÓGICA DE LA CONVERSACIÓN (REGLAS FIJAS) ============
 
 async function getBusinessConfig() {
-  const snap = await CONFIG_DOC.get();
-  const data = snap.exists ? snap.data() : {};
+  const [menuSnap, configSnap] = await Promise.all([MENU_DOC.get(), CONFIG_DOC.get()]);
+  const menuData = menuSnap.exists ? menuSnap.data() : {};
+  const configData = configSnap.exists ? configSnap.data() : {};
   return {
-    menuItems: data.menuItems || [],
-    botConfig: data.botConfig || {},
-    bankHolders: data.bankHolders || [],
+    menuItems: menuData.menuItems || [],
+    botConfig: configData.botConfig || {},
+    bankHolders: configData.bankHolders || [],
   };
 }
 
