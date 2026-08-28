@@ -1,0 +1,14 @@
+{
+  "name": "salinas-burger-bot",
+  "version": "1.0.0",
+  "description": "Backend que conecta el chatbot de WhatsApp de Salinas Burger",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
