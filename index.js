@@ -35,6 +35,14 @@ async function sendWhatsAppText(to, body) {
   );
 }
 
+async function sendWhatsAppDocument(to, link, filename) {
+  await axios.post(
+    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+    { messaging_product: "whatsapp", to, type: "document", document: { link, filename } },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+}
+
 // ============ EXPRESS APP ============
 const app = express();
 app.use(express.json());
@@ -126,6 +134,11 @@ async function handleIncomingMessage(phone, text, isImage) {
       session,
       botConfig.welcomeMsg || "¡Hola! Bienvenido a Salinas Burger 🍔"
     );
+
+    if (botConfig.menuPdfUrl) {
+      await sendWhatsAppDocument(phone, botConfig.menuPdfUrl, botConfig.menuPdfName || "Menu.pdf");
+      session.chatHistory.push({ sender: "ai", text: `📄 [PDF enviado: ${botConfig.menuPdfName || "Menu.pdf"}]` });
+    }
 
     const burgers = menuItems.filter((i) => i.category === "burger" && i.available);
     if (burgers.length === 0) {
