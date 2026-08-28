@@ -1,74 +1,50 @@
-# Bot de WhatsApp — Salinas Burger
+# Bot de WhatsApp — Salinas Burger (con reglas fijas + Firebase)
 
-Este servidor conecta tu número de WhatsApp Business (+593 4 249-8947) con
-la API de Meta: recibe los mensajes de los clientes y responde automáticamente.
+Este servidor recibe los mensajes de los clientes por WhatsApp, los guía con
+un menú por pasos (sin IA), y guarda el pedido confirmado en Firestore para
+que aparezca en la app del panel.
 
-## 1. Instalar dependencias
+## Variables de entorno (Render > Environment)
 
-Necesitas [Node.js](https://nodejs.org) instalado (ya lo tienes, del paso de la APK).
+- `PHONE_NUMBER_ID` = 1328549223667218
+- `WHATSAPP_TOKEN` = tu token (regenéralo si quedó expuesto antes)
+- `VERIFY_TOKEN` = la palabra que pusiste en Meta como "Identificador de verificación"
 
-```
-cd salinas-bot
-npm install
-```
+## Secret File (Render > Environment > Secret Files)
 
-## 2. Configurar tus datos
+- Filename: `firebase-service-account.json`
+- Contenido: pega ahí el JSON completo de la clave privada que descargaste
+  desde Firebase (Configuración del proyecto > Cuentas de servicio > Generar
+  nueva clave privada).
 
-1. Copia `.env.example` y renómbralo a `.env`
-2. Pega tu `WHATSAPP_TOKEN` (genera uno nuevo en Meta — regenera el que compartiste antes, quedó expuesto)
-3. Deja `VERIFY_TOKEN` como está, o cámbialo por cualquier palabra que quieras (la usarás en el paso 4)
+## Cómo funciona la conversación
 
-## 3. Encender el servidor
+1. Cliente escribe algo por primera vez → el bot manda el mensaje de
+   bienvenida (el que configuraste en "Configurar Bot IA" del panel) + el
+   listado de hamburguesas disponibles.
+2. Cliente responde con un número → domicilio o retiro.
+3. Si es domicilio, pide la dirección.
+4. Ofrece adicionales (papas, etc.) del menú.
+5. Ofrece bebida, y si acepta, primero la presentación (capacidad) y luego
+   la marca.
+6. Envía el total y los datos bancarios (los que configuraste en el panel).
+7. Cuando el cliente manda una FOTO (comprobante), el pedido se confirma y
+   se guarda en Firestore, colección `orders_whatsapp`.
 
-```
-npm start
-```
+## Dónde quedan los pedidos
 
-Debe mostrar: `Servidor escuchando en http://localhost:3000`
+En la base de datos `salinasburger`, colección `orders_whatsapp` — separada
+del documento que usa el botón "Guardar Cambios" del panel, para que no se
+pisen entre sí. Hace falta un pequeño cambio en `App.jsx` (ver abajo) para
+que esos pedidos aparezcan automáticamente en el panel.
 
-## 4. Exponerlo a internet (para pruebas)
+## Importante — lo que NO hace esta primera versión
 
-Meta necesita una URL pública (https), no puede llamar a tu `localhost`. Para
-pruebas, usa [ngrok](https://ngrok.com/download):
-
-```
-ngrok http 3000
-```
-
-Te va a dar una URL como `https://algo-random.ngrok-free.app`. Cópiala.
-
-> ⚠️ Cada vez que reinicies ngrok (versión gratis) la URL cambia, y tendrás
-> que actualizarla en Meta de nuevo. Cuando quieras dejarlo funcionando de
-> forma permanente, hay que subir este servidor a un hosting real (Render,
-> Railway, un VPS, etc.) — te ayudo con eso cuando llegues a ese paso.
-
-## 5. Completar la pantalla de Meta (la de tu captura)
-
-- **URL de devolución de llamada**: `https://algo-random.ngrok-free.app/webhook`
-  (la URL de ngrok + `/webhook` al final)
-- **Identificador de verificación**: el mismo texto que pusiste en `VERIFY_TOKEN`
-  dentro de tu `.env` (por defecto: `salinasburger2026`)
-
-Dale click en "Verificar y guardar". Si tu servidor está corriendo, en la
-consola vas a ver `✅ Webhook verificado por Meta`.
-
-## 6. Suscribirte al campo "messages"
-
-Justo debajo de esta pantalla en Meta, hay una lista de "campos de webhook"
-(messages, message_status, etc.). Activa/suscríbete al menos a **messages** —
-si no, aunque el webhook esté verificado, no te van a llegar los mensajes.
-
-## 7. Probar
-
-Desde tu celular personal (agregado antes como número de prueba en Meta),
-escríbele algo a tu número de WhatsApp Business. Deberías ver en la consola
-del servidor el mensaje recibido, y recibir una respuesta automática en tu
-WhatsApp.
-
-## Siguiente paso
-
-Este servidor por ahora responde siempre lo mismo, solo para validar que el
-circuito completo funciona. El siguiente paso es reemplazar esa respuesta fija
-por la lógica real: leer el menú, tomar el pedido, y guardarlo en la misma
-base de datos que usa el panel de administración (App.jsx), para que aparezca
-ahí como "pendiente".
+- No descarga ni valida el comprobante de pago en sí, solo detecta que
+  llegó una imagen y confirma el pedido (igual que hace el flujo simulado
+  del panel). La verificación real la sigue haciendo el dueño desde la app.
+- No envía el PDF del menú (el archivo solo vive en el celular del dueño,
+  no en un servidor); en su lugar, el bot arma la lista de precios desde
+  los mismos datos del menú.
+- No entiende texto libre ("quiero una doble con papas") — el cliente debe
+  responder con los números que el bot va mostrando.
