@@ -222,8 +222,8 @@ async function sendSidesMenu(phone, session, menuItems, hasBurger) {
   const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
   
   let msg = hasBurger 
-    ? `Notamos que pediste hamburguesas 🍔 ¿Deseas acompañar tu pedido con unas papas o extras?\n\n${listado}\n\nResponde con el número de la opción, o *0* si no deseas nada más.`
-    : `¿Deseas acompañar tu pedido con algo de esto?\n\n${listado}\n\nResponde con el número de la opción, o *0* si no deseas nada más.`;
+    ? `Notamos que pediste hamburguesas 🍔 ¿Deseas acompañar tu pedido con unas papas o extras?\n\nResponde con el número de la opción, o *0* si no deseas nada más.\n\n${listado}`
+    : `¿Deseas acompañar tu pedido con algo de esto?\n\nResponde con el número de la opción, o *0* si no deseas nada más.\n\n${listado}`;
 
   await replyAndLog(phone, session, msg);
 }
@@ -235,7 +235,7 @@ async function goToDrinkStepOrDelivery(phone, session) {
 
 async function askDeliveryType(phone, session, botConfig) {
   session.step = "delivery_type";
-  if (botConfig.upsellMsg) await replyAndLog(phone, session, botConfig.upsellMsg);
+  // Se omitió el mensaje previo de upsell para pasar directo a preguntar el método de entrega
   await replyAndLog(phone, session, "¡Excelente! Ya tenemos todo lo que necesitas.\n\n¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
 }
 
@@ -255,7 +255,6 @@ async function sendPaymentInfo(phone, session, bankHolders) {
 async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId) {
   const { menuItems, botConfig, bankHolders } = await getBusinessConfig();
   
-  // --- PALABRA DE ESCAPE / REINICIO MANUAL ---
   if (text.toLowerCase() === "reiniciar" || text.toLowerCase() === "cancelar") {
     await clearSession(phone);
     await sendWhatsAppText(phone, "✅ Tu pedido anterior ha sido cancelado. Envía cualquier mensaje (como 'Hola') para empezar uno nuevo 🍔");
@@ -269,7 +268,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   if (isLocation) entrada = "(ubicación compartida)";
   if (isOrder) entrada = "(carrito de compras recibido)";
 
-  // --- Inicio de conversación ---
   if (!session || (isOrder && session.step === "menu")) {
     session = session || { step: "menu", data: {}, chatHistory: [] };
     logClient(session, entrada);
@@ -312,15 +310,14 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       .map((b, i) => `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`)
       .join("\n");
       
-    // 💡 AVISO DE CANCELAR EN EL MENÚ INICIAL
-    await replyAndLog(phone, session, `Este es nuestro menú principal:\n\n${listado}\n\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n\n*(💡 Tip: Si te equivocas en tu pedido, puedes escribir "cancelar" en cualquier momento)*`);
+    // Instrucciones y tip movidos ANTES del menú
+    await replyAndLog(phone, session, `Este es nuestro menú principal.\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n*(💡 Tip: Si te equivocas en tu pedido, puedes escribir "cancelar" en cualquier momento)*\n\n${listado}`);
     await saveSession(phone, session);
     return;
   }
 
   logClient(session, entrada);
 
-  // --- Paso: eligiendo hamburguesa o combo ---
   if (session.step === "menu") {
     const opciones = session.data.opciones || [];
     const matches = text.match(/\d+/g);
@@ -366,17 +363,14 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       return;
     }
 
-    // 💡 AVISO DE CANCELAR CUANDO EL BOT NO ENTIENDE LA OPCIÓN
     await replyAndLog(phone, session, "No entendí esa opción 🙁 Responde con el número del producto de la lista.\n*(O escribe la palabra 'cancelar' para empezar de nuevo)*");
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: cantidad del producto principal ---
   if (session.step === "quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
-      // 💡 AVISO DE CANCELAR CUANDO ESCRIBE MAL LA CANTIDAD
       await replyAndLog(phone, session, "Escribe un número válido de unidades (ej. 1, 2, 3...).\n*(O escribe la palabra 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
@@ -398,7 +392,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: sabor de la bebida INCLUIDA ---
   if (session.step === "combo_drink_flavor") {
     const idx = parseInt(text, 10) - 1;
     const drinks = session.data.comboDrinkOptions || [];
@@ -423,7 +416,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: adicionales/acompañantes ---
   if (session.step === "sides") {
     if (text === "0") {
       await goToDrinkStepOrDelivery(phone, session);
@@ -444,7 +436,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: cantidad del acompañante ---
   if (session.step === "side_quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
@@ -463,10 +454,11 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: quiere bebida EXTRA sí/no ---
   if (session.step === "drink_yn") {
     if (text === "2") {
       await askDeliveryType(phone, session, botConfig);
+      await saveSession(phone, session);
+      return;
     } else if (text === "1") {
       const drinks = menuItems.filter((i) => i.category === "drink" && i.available);
       const capacidades = [...new Set(drinks.map((d) => d.volume || "Personal"))];
@@ -481,7 +473,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: capacidad de bebida ---
   if (session.step === "drink_capacity") {
     const idx = parseInt(text, 10) - 1;
     const capacidades = session.data.drinkCapacities || [];
@@ -502,7 +493,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: elige marca de bebida ---
   if (session.step === "drink_choice") {
     const idx = parseInt(text, 10) - 1;
     const drinks = session.data.drinkOptions || [];
@@ -518,7 +508,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: cantidad de bebida EXTRA ---
   if (session.step === "drink_quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
@@ -530,13 +519,12 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     session.data.items.push({ ...drink, qty });
     session.data.foodTotal += drink.price * qty;
 
-    session.step = "drink_yn";
-    await replyAndLog(phone, session, "¿Deseas agregar otra bebida extra?\n1. Sí\n2. No");
+    // Ya no vuelve a preguntar por otra bebida, pasa directo al tipo de entrega
+    await askDeliveryType(phone, session, botConfig);
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: domicilio o retiro ---
   if (session.step === "delivery_type") {
     if (text === "1" || isLocation) {
       session.data.deliveryType = "domicilio";
@@ -558,7 +546,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: dirección ---
   if (session.step === "address") {
     const address = isLocation ? locationLink : text;
     await requestDeliveryQuote(phone, session, botConfig, address);
@@ -566,18 +553,14 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: esperando el precio del envío ---
   if (session.step === "awaiting_delivery_price") {
-    // 💡 AVISO DE CANCELAR CUANDO ESTÁ ESPERANDO EL ENVÍO Y ESCRIBE ALGO
     await replyAndLog(phone, session, "Seguimos cotizando tu envío con nuestro motorizado, un momento por favor 🛵.\n\n*(Si ya no deseas esperar o quieres modificar tu pedido, escribe 'cancelar')*");
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: esperando comprobante ---
   if (session.step === "payment") {
     if (!isImage) {
-      // 💡 AVISO DE CANCELAR CUANDO SE DEMORA CON EL COMPROBANTE
       await replyAndLog(phone, session, "Para confirmar tu pedido, envíame la *foto o captura* de la transferencia 📸.\n\n*(Si tuviste un problema y deseas anular este pedido, escribe 'cancelar')*");
       await saveSession(phone, session);
       return;
@@ -587,7 +570,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: esperando que el dueño apruebe el comprobante ---
   if (session.step === "awaiting_approval") {
     await replyAndLog(phone, session, "Estamos verificando tu comprobante, un momento por favor 🙏.\n*(Escribe 'cancelar' si necesitas anular el pedido)*");
     await saveSession(phone, session);
@@ -595,7 +577,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   }
 }
 
-// --- Pide la cotización del envío al dueño ---
 async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicacion) {
   const ownerPhone = botConfig.ownerPhone;
   const code = generateCode();
@@ -620,7 +601,6 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
   }
 }
 
-// --- Reenvía el comprobante al dueño y espera su aprobación ---
 async function requestPaymentApproval(phone, session, botConfig, mediaId) {
   const ownerPhone = botConfig.ownerPhone;
   const code = generateCode("P");
@@ -641,7 +621,6 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
   }
 }
 
-// --- Procesa la respuesta del dueño ---
 async function handleOwnerReply(text) {
   const { botConfig } = await getBusinessConfig();
   const ownerPhone = botConfig.ownerPhone;
