@@ -151,6 +151,14 @@ function itemIncludesDrink(item) {
   return /cola/i.test(`${item.name} ${item.desc || ""}`);
 }
 
+function itemIncludesFries(item) {
+  return /papas|marranita/i.test(`${item.name} ${item.desc || ""}`);
+}
+
+function getSauceOptions(menuItems) {
+  return menuItems.filter((i) => i.category === "sauce" && i.available);
+}
+
 // Detecta qué valor de "volume" usan las bebidas Personales en este menú (ej. "300 ml"),
 // buscando cualquier bebida cuyo nombre diga "Personal", y devuelve solo esas opciones disponibles.
 function getPersonalDrinkOptions(menuItems) {
@@ -232,21 +240,26 @@ async function processNextPendingMainItem(phone, session) {
   const currentItem = session.data.pendingMainItems[0];
 
   if (currentItem.qty) {
-    session.data.items.push(currentItem);
-    session.data.foodTotal = (session.data.foodTotal || 0) + (currentItem.price * currentItem.qty);
-
-    if (itemIncludesDrink(currentItem)) {
-      const { menuItems } = await getBusinessConfig();
-      const drinks = getPersonalDrinkOptions(menuItems);
-      session.data.comboDrinkOptions = drinks;
-      session.step = "combo_drink_flavor";
-      const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
-      await replyAndLog(phone, session, `Tu producto "${currentItem.name}" incluye una cola personal 🥤 ¿Cuál sabor prefieres?\n\n${listado}`);
-      return;
-    } else {
-      session.data.pendingMainItems.shift();
-      return processNextPendingMainItem(phone, session);
+    if (!currentItem._pushed) {
+      session.data.items.push(currentItem);
+      session.data.foodTotal = (session.data.foodTotal || 0) + (currentItem.price * currentItem.qty);
+      currentItem._pushed = true;
     }
+
+    if (itemIncludesFries(currentItem) && !currentItem._sauceDone) {
+      currentItem._sauceDone = true;
+      const pregunto = await askSauceFlavor(phone, session, currentItem, "main_item_continue");
+      if (pregunto) return;
+    }
+
+    if (itemIncludesDrink(currentItem) && !currentItem._drinkDone) {
+      currentItem._drinkDone = true;
+      await askDrinkFlavor(phone, session, currentItem, "main_item_continue");
+      return;
+    }
+
+    session.data.pendingMainItems.shift();
+    return processNextPendingMainItem(phone, session);
   }
 
   session.step = "quantity";
@@ -271,9 +284,38 @@ async function sendSidesMenu(phone, session, menuItems, hasBurger) {
   await replyAndLog(phone, session, msg);
 }
 
+// Pregunta qué salsa desea para un ítem que incluye papas/marranitas (individual, side o dentro de un combo).
+async function askSauceFlavor(phone, session, item, afterStep) {
+  const { menuItems } = await getBusinessConfig();
+  const salsas = getSauceOptions(menuItems);
+  if (salsas.length === 0) return false; // no hay salsas configuradas, seguir el flujo normal
+  session.data.sauceOptions = salsas;
+  session.data.afterSauceStep = afterStep;
+  session.step = "item_sauce_flavor";
+  const listado = salsas.map((s, i) => `${i + 1}. ${s.name}`).join("\n");
+  await replyAndLog(phone, session, `Tu producto "${item.name}" incluye papas 🍟 ¿Qué salsa deseas?\n\n${listado}`);
+  return true;
+}
+
+// Pregunta el sabor de la cola incluida en un ítem principal o en un side.
+async function askDrinkFlavor(phone, session, item, afterStep) {
+  const { menuItems } = await getBusinessConfig();
+  const drinks = getPersonalDrinkOptions(menuItems);
+  session.data.comboDrinkOptions = drinks;
+  session.data.afterComboDrinkStep = afterStep;
+  session.step = "combo_drink_flavor";
+  const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
+  await replyAndLog(phone, session, `Tu producto "${item.name}" incluye una cola personal 🥤 ¿Cuál sabor prefieres?\n\n${listado}`);
+}
+
 async function goToDrinkStepOrDelivery(phone, session) {
   session.step = "drink_yn";
   await replyAndLog(phone, session, "¿Deseas agregar una *bebida extra* a tu pedido?\n1. Sí\n2. No");
+}
+
+async function askOrderPaymentMethod(phone, session) {
+  session.step = "order_payment_method";
+  await replyAndLog(phone, session, "¡Perfecto! Ya tenemos tu pedido completo 🛍️\n\n¿Cómo deseas pagar tu *pedido*?\n1. Efectivo\n2. Transferencia");
 }
 
 async function askDeliveryType(phone, session, botConfig) {
@@ -281,15 +323,48 @@ async function askDeliveryType(phone, session, botConfig) {
   await replyAndLog(phone, session, "¡Excelente! Ya tenemos todo lo que necesitas.\n\n¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
 }
 
+// Devuelve true si el pedido quedó finalizado dentro de esta función (100% efectivo, sin comprobante que esperar),
+// para que quien la llame NO vuelva a guardar la sesión (ya fue borrada). Devuelve false si sigue en curso
+// (falta comprobante de transferencia), y quien la llame sí debe guardar la sesión normalmente.
 async function sendPaymentInfo(phone, session, bankHolders) {
-  const total = session.data.foodTotal + (session.data.deliveryFee || 0);
-  const cuentas = formatBankAccountsForChat(bankHolders);
-  let msg = `El total de tu pedido es $${session.data.foodTotal.toFixed(2)}`;
-  if (session.data.deliveryFee > 0) {
-    msg += ` + $${session.data.deliveryFee.toFixed(2)} de envío = $${total.toFixed(2)}`;
+  const foodTotal = session.data.foodTotal || 0;
+  const deliveryFee = session.data.deliveryFee || 0;
+  const total = foodTotal + deliveryFee;
+
+  const orderMethod = session.data.orderPaymentMethod; // "efectivo" | "transferencia"
+  const deliveryMethod = session.data.deliveryPaymentMethod; // "efectivo" | "transferencia" | undefined (retiro en tienda)
+
+  const cashAmount = (orderMethod === "efectivo" ? foodTotal : 0) + (deliveryMethod === "efectivo" ? deliveryFee : 0);
+  const transferAmount = (orderMethod === "transferencia" ? foodTotal : 0) + (deliveryMethod === "transferencia" ? deliveryFee : 0);
+
+  let msg = `El total de tu pedido es $${total.toFixed(2)}.\n\n`;
+  if (cashAmount > 0) msg += `💵 Pago en efectivo (pedido o envío): $${cashAmount.toFixed(2)}\n`;
+  if (transferAmount > 0) msg += `💳 Pago por transferencia (pedido o envío): $${transferAmount.toFixed(2)}\n`;
+
+  if (transferAmount > 0) {
+    const cuentas = formatBankAccountsForChat(bankHolders);
+    msg += `\nEl monto por transferencia se paga a:${cuentas}\n\nCuando termines, envíame la *foto del comprobante* por aquí para confirmar tu pedido 📸.`;
+    if (cashAmount > 0) {
+      msg += ` (El monto en efectivo lo pagas directo ${deliveryMethod === "efectivo" ? "al motorizado" : "al retirar tu pedido"}).`;
+    }
+    session.step = "payment";
+    await replyAndLog(phone, session, msg);
+    return false;
   }
-  msg += `\n\nEl total del pedido se paga por transferencia a:${cuentas}\n\nCuando termines, envíame la *foto del comprobante* por aquí para confirmar tu pedido 📸. (El motorizado solo entrega el pedido).`;
+
+  // Todo el pedido se paga en efectivo: no se necesita comprobante, se envía directo a cocina.
+  msg += `\nTen el efectivo listo, se paga directo ${deliveryMethod === "efectivo" || session.data.deliveryType === "domicilio" ? "al motorizado" : "al retirar tu pedido"} 🙌`;
   await replyAndLog(phone, session, msg);
+
+  const orderNumber = await getOrderNumber(session);
+  await finalizeOrder(phone, session, "✅ ¡Pedido confirmado! Ya fue enviado a cocina 🍳. Recuerda tener el efectivo listo. ¡Gracias por tu compra! 🍔");
+
+  const { botConfig } = await getBusinessConfig();
+  if (botConfig.ownerPhone) {
+    await sendWhatsAppText(botConfig.ownerPhone, `💵 Pedido #${orderNumber} pagado en EFECTIVO\n\n${buildOrderBreakdownText(phone, session, orderNumber)}`);
+  }
+  await clearSession(phone);
+  return true;
 }
 
 // ============ CONVERSACIÓN CON EL CLIENTE ============
@@ -420,7 +495,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     
     const currentItem = session.data.pendingMainItems.shift(); 
     
-    if (itemIncludesDrink(currentItem)) {
+    if (itemIncludesDrink(currentItem) || itemIncludesFries(currentItem)) {
       for (let i = 0; i < qty; i++) {
          session.data.pendingMainItems.unshift({ ...currentItem, qty: 1 });
       }
@@ -442,8 +517,11 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       await saveSession(phone, session);
       return;
     }
-    
-    if (session.data.afterComboDrinkStep === "sides_continue") {
+
+    const afterStep = session.data.afterComboDrinkStep;
+    delete session.data.afterComboDrinkStep;
+
+    if (afterStep === "sides_continue") {
       const side = session.data.currentSide;
       session.data.items.push({
         ...drinks[idx],
@@ -452,20 +530,67 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
         incluida: true,
         name: `${drinks[idx].name} (para ${side.name})`,
       });
-      delete session.data.afterComboDrinkStep;
       await goToDrinkStepOrDelivery(phone, session);
       await saveSession(phone, session);
       return;
     }
 
-    const currentItem = session.data.pendingMainItems.shift(); 
-    
+    const currentItem = session.data.pendingMainItems[0];
+
     session.data.items.push({ 
       ...drinks[idx], 
       price: 0, 
       qty: 1, 
       incluida: true,
       name: `${drinks[idx].name} (para ${currentItem.name})`
+    });
+
+    await processNextPendingMainItem(phone, session);
+    await saveSession(phone, session);
+    return;
+  }
+
+  if (session.step === "item_sauce_flavor") {
+    const idx = parseInt(text, 10) - 1;
+    const salsas = session.data.sauceOptions || [];
+    if (isNaN(idx) || !salsas[idx]) {
+      await replyAndLog(phone, session, "Responde con el número de la salsa de la lista.\n*(O escribe 'cancelar' para empezar de nuevo)*");
+      await saveSession(phone, session);
+      return;
+    }
+    const salsaElegida = salsas[idx];
+    const afterStep = session.data.afterSauceStep;
+    delete session.data.afterSauceStep;
+
+    if (afterStep === "sides_continue") {
+      const side = session.data.currentSide;
+      session.data.items.push({
+        ...salsaElegida,
+        price: 0,
+        qty: 1,
+        incluida: true,
+        name: `${salsaElegida.name} (para ${side.name})`,
+      });
+
+      if (itemIncludesDrink(side)) {
+        await askDrinkFlavor(phone, session, side, "sides_continue");
+        await saveSession(phone, session);
+        return;
+      }
+
+      await goToDrinkStepOrDelivery(phone, session);
+      await saveSession(phone, session);
+      return;
+    }
+
+    // afterStep === "main_item_continue"
+    const currentItem = session.data.pendingMainItems[0];
+    session.data.items.push({
+      ...salsaElegida,
+      price: 0,
+      qty: 1,
+      incluida: true,
+      name: `${salsaElegida.name} (para ${currentItem.name})`,
     });
 
     await processNextPendingMainItem(phone, session);
@@ -508,14 +633,16 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     session.data.items.push({ ...side, qty });
     session.data.foodTotal += side.price * qty;
 
+    if (itemIncludesFries(side)) {
+      const pregunto = await askSauceFlavor(phone, session, side, "sides_continue");
+      if (pregunto) {
+        await saveSession(phone, session);
+        return;
+      }
+    }
+
     if (itemIncludesDrink(side)) {
-      const { menuItems } = await getBusinessConfig();
-      const drinks = getPersonalDrinkOptions(menuItems);
-      session.data.comboDrinkOptions = drinks;
-      session.data.afterComboDrinkStep = "sides_continue"; // para saber a dónde volver luego del sabor
-      session.step = "combo_drink_flavor";
-      const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
-      await replyAndLog(phone, session, `Tu producto "${side.name}" incluye una cola personal 🥤 ¿Cuál sabor prefieres?\n\n${listado}`);
+      await askDrinkFlavor(phone, session, side, "sides_continue");
       await saveSession(phone, session);
       return;
     }
@@ -528,7 +655,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
 
   if (session.step === "drink_yn") {
     if (text === "2") {
-      await askDeliveryType(phone, session, botConfig);
+      await askOrderPaymentMethod(phone, session);
       await saveSession(phone, session);
       return;
     } else if (text === "1") {
@@ -603,6 +730,21 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     session.data.items.push({ ...drink, qty });
     session.data.foodTotal += drink.price * qty;
 
+    await askOrderPaymentMethod(phone, session);
+    await saveSession(phone, session);
+    return;
+  }
+
+  if (session.step === "order_payment_method") {
+    if (text === "1") {
+      session.data.orderPaymentMethod = "efectivo";
+    } else if (text === "2") {
+      session.data.orderPaymentMethod = "transferencia";
+    } else {
+      await replyAndLog(phone, session, "Responde 1 para Efectivo o 2 para Transferencia.\n*(O escribe 'cancelar' para empezar de nuevo)*");
+      await saveSession(phone, session);
+      return;
+    }
     await askDeliveryType(phone, session, botConfig);
     await saveSession(phone, session);
     return;
@@ -621,7 +763,9 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       session.data.deliveryType = "retiro";
       session.data.deliveryFee = 0;
       session.step = "payment";
-      await sendPaymentInfo(phone, session, bankHolders);
+      const finalizado = await sendPaymentInfo(phone, session, bankHolders);
+      if (!finalizado) await saveSession(phone, session);
+      return;
     } else {
       await replyAndLog(phone, session, "Responde 1 para Domicilio o 2 para Retirar en tienda (o comparte tu ubicación 📍).\n*(O escribe 'cancelar' para empezar de nuevo)*");
     }
@@ -639,6 +783,22 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   if (session.step === "awaiting_delivery_price") {
     await replyAndLog(phone, session, "Seguimos cotizando tu envío con nuestro motorizado, un momento por favor 🛵.\n\n*(Si ya no deseas esperar o quieres modificar tu pedido, escribe 'cancelar')*");
     await saveSession(phone, session);
+    return;
+  }
+
+  if (session.step === "delivery_payment_method") {
+    if (text === "1") {
+      session.data.deliveryPaymentMethod = "efectivo";
+    } else if (text === "2") {
+      session.data.deliveryPaymentMethod = "transferencia";
+    } else {
+      await replyAndLog(phone, session, "Responde 1 para Efectivo o 2 para Transferencia.\n*(O escribe 'cancelar' para empezar de nuevo)*");
+      await saveSession(phone, session);
+      return;
+    }
+    session.step = "payment";
+    const finalizado = await sendPaymentInfo(phone, session, bankHolders);
+    if (!finalizado) await saveSession(phone, session);
     return;
   }
 
@@ -685,6 +845,33 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
   }
 }
 
+// Arma el texto con el desglose del pedido (ítems, sabores incluidos, subtotal, envío y total)
+// para que el dueño pueda verificarlo contra el comprobante que recibirá justo después.
+function buildOrderBreakdownText(phone, session, code) {
+  const { items = [], foodTotal = 0, deliveryFee = 0, address, deliveryType } = session.data;
+  const total = foodTotal + (deliveryFee || 0);
+
+  // Igual criterio que en finalizeOrder: las bebidas incluidas (name = "X (para Y)")
+  // se muestran como el "sabor" del producto padre, no como una línea aparte.
+  const incluidas = items.filter((i) => i.incluida);
+  const principales = items.filter((i) => !i.incluida);
+
+  const lineas = principales.map((item) => {
+    const incluidaDeEste = incluidas.find((inc) => inc.name.includes(`(para ${item.name})`));
+    const qty = item.qty || 1;
+    const lineTotal = item.price * qty;
+    const sabor = incluidaDeEste ? ` (sabor: ${incluidaDeEste.name.split(" (para ")[0]})` : "";
+    return `• ${qty}x ${item.name}${sabor} — $${lineTotal.toFixed(2)}`;
+  });
+
+  let msg = `📋 Desglose del Pedido #${code}\nCliente: ${phone}\n\n${lineas.join("\n")}\n\nSubtotal: $${foodTotal.toFixed(2)}`;
+  if (deliveryFee > 0) msg += `\nEnvío: $${deliveryFee.toFixed(2)}`;
+  msg += `\nTotal: $${total.toFixed(2)}`;
+  msg += `\n\n${deliveryType === "domicilio" ? `📍 Domicilio: ${address || "-"}` : "🏬 Retira en tienda"}`;
+
+  return msg;
+}
+
 async function requestPaymentApproval(phone, session, botConfig, mediaId) {
   const ownerPhone = botConfig.ownerPhone;
   const orderNumber = await getOrderNumber(session);
@@ -697,12 +884,18 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
 
   await replyAndLog(phone, session, "📸 ¡Comprobante recibido! Lo estamos verificando, en un momento confirmamos tu pedido ✅");
 
-  if (ownerPhone && mediaId) {
-    await sendWhatsAppImageById(
-      ownerPhone,
-      mediaId,
-      `🧾 Comprobante de pago\nPedido #${code}\nCliente: ${phone}\nTotal: $${total.toFixed(2)}\n\nResponde: #${code} ok (confirmar) o #${code} no (rechazar)`
-    );
+  if (ownerPhone) {
+    // 1) Primero el desglose del pedido, para que quede en concordancia con el comprobante
+    await sendWhatsAppText(ownerPhone, buildOrderBreakdownText(phone, session, code));
+
+    // 2) Después el comprobante de pago
+    if (mediaId) {
+      await sendWhatsAppImageById(
+        ownerPhone,
+        mediaId,
+        `🧾 Comprobante de pago\nPedido #${code}\nCliente: ${phone}\nTotal: $${total.toFixed(2)}\n\nResponde: #${code} ok (confirmar) o #${code} no (rechazar)`
+      );
+    }
   }
 }
 
@@ -744,11 +937,8 @@ async function resolveDeliveryQuote(code, rest, ownerPhone) {
   if (!session) return;
 
   session.data.deliveryFee = price;
-  await replyAndLog(phone, session, `El envío tiene un valor de $${price.toFixed(2)}, se paga en *efectivo* directo al motorizado 🛵`);
-
-  session.step = "payment";
-  const { bankHolders } = await getBusinessConfig();
-  await sendPaymentInfo(phone, session, bankHolders);
+  session.step = "delivery_payment_method";
+  await replyAndLog(phone, session, `El envío tiene un valor de $${price.toFixed(2)} 🛵\n\n¿Cómo deseas pagar el *envío*?\n1. Efectivo (directo al motorizado)\n2. Transferencia`);
   await saveSession(phone, session);
 
   if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Envié $${price.toFixed(2)} al cliente del pedido #${code}.`);
@@ -780,14 +970,25 @@ async function resolvePaymentApproval(code, rest, ownerPhone) {
   }
 }
 
-async function finalizeOrder(phone, session) {
+async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado! Tu pedido ya fue enviado a cocina. En breve nos comunicamos si es necesario. ¡Gracias por tu compra! 🍔") {
   const { items, foodTotal, deliveryFee, address, deliveryType } = session.data;
-  const confirmMsg = "✅ ¡Pago confirmado! Tu pedido ya fue enviado a cocina. En breve nos comunicamos si es necesario. ¡Gracias por tu compra! 🍔";
   await replyAndLog(phone, session, confirmMsg);
 
-  const itemsSummary = items
-    .map((i) => `• ${i.qty || 1}x ${i.name}${i.incluida ? " (incluida)" : ""}${i.volume ? ` (${i.volume})` : ""} — $${i.price.toFixed(2)} c/u`)
-    .join("\n");
+  // Las bebidas incluidas (name = "X (para Y)") se juntan como "sabor" del producto padre,
+  // en vez de mostrarse como una línea aparte.
+  const incluidas = items.filter((i) => i.incluida);
+  const principales = items.filter((i) => !i.incluida);
+  const itemsList = principales.map((item) => {
+    const incluidaDeEste = incluidas.find((inc) => inc.name.includes(`(para ${item.name})`));
+    return {
+      qty: item.qty || 1,
+      name: item.name,
+      category: item.category,
+      unitPrice: item.price,
+      total: item.price * (item.qty || 1),
+      flavor: incluidaDeEste ? incluidaDeEste.name.split(" (para ")[0] : null,
+    };
+  });
 
   const orderNumber = await getOrderNumber(session); // el mismo número usado en la cotización/aprobación con el dueño
   const generatedCode = `#${orderNumber}`;
@@ -800,7 +1001,7 @@ async function finalizeOrder(phone, session) {
     client: phone,
     phone,
     sector: deliveryType === "domicilio" ? address : "Retiro en tienda",
-    items: itemsSummary,
+    items: itemsList,
     foodTotal: numericalFoodTotal,
     deliveryFee: numericalDeliveryFee,
     total: numericalFoodTotal + numericalDeliveryFee, 
