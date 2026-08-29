@@ -17,8 +17,8 @@ const MENU_DOC = db.collection("appData").doc("menu");
 const CONFIG_DOC = db.collection("appData").doc("config");
 const ORDERS_COL = db.collection("pedidos");
 const SESSIONS_COL = db.collection("bot_sessions");
-const QUOTES_COL = db.collection("cotizaciones_envio"); // pedidos esperando precio de envío del dueño
-const APPROVALS_COL = db.collection("aprobaciones_pago"); // comprobantes esperando aprobación del dueño
+const QUOTES_COL = db.collection("cotizaciones_envio"); 
+const APPROVALS_COL = db.collection("aprobaciones_pago"); 
 
 // ============ WHATSAPP / META ============
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
@@ -41,7 +41,6 @@ async function sendWhatsAppDocument(to, link, filename) {
   );
 }
 
-// Reenvía una imagen ya recibida (por su media id) a otro número, sin volver a subirla
 async function sendWhatsAppImageById(to, mediaId, caption) {
   await axios.post(
     `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
@@ -66,7 +65,7 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // responder rápido a Meta
+  res.sendStatus(200); 
 
   try {
     const entry = req.body.entry?.[0];
@@ -77,13 +76,16 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const isImage = message.type === "image";
     const isLocation = message.type === "location";
+    const isOrder = message.type === "order"; // Detección de Carrito de Catálogo
     const mediaId = isImage ? message.image?.id : null;
     const text = message.text?.body?.trim() || "";
+    const orderData = isOrder ? message.order : null;
+    
     const locationLink = isLocation
       ? `https://www.google.com/maps?q=${message.location.latitude},${message.location.longitude}`
       : null;
 
-    console.log(`📩 [${from}] ${isImage ? "(imagen)" : isLocation ? "(ubicación)" : text}`);
+    console.log(`📩 [${from}] ${isImage ? "(imagen)" : isLocation ? "(ubicación)" : isOrder ? "(carrito)" : text}`);
 
     const { botConfig } = await getBusinessConfig();
     const ownerPhone = normalizePhone(botConfig.ownerPhone);
@@ -91,7 +93,7 @@ app.post("/webhook", async (req, res) => {
     if (ownerPhone && normalizePhone(from) === ownerPhone) {
       await handleOwnerReply(text);
     } else {
-      await handleIncomingMessage(from, text, isImage, isLocation, locationLink, mediaId);
+      await handleIncomingMessage(from, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId);
     }
   } catch (err) {
     console.error("⚠️ Error procesando el webhook:", err.response?.data || err.message);
@@ -99,7 +101,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 function normalizePhone(p) {
-  return (p || "").replace(/\D/g, ""); // deja solo dígitos, para comparar sin importar formato (+593, espacios, etc.)
+  return (p || "").replace(/\D/g, ""); 
 }
 
 // ============ CONFIGURACIÓN DEL NEGOCIO ============
@@ -130,7 +132,6 @@ function normalizeText(t) {
     .trim();
 }
 
-// Interpreta precios informales: "3 0" -> 3.0, "3,50" -> 3.5, "3" -> 3, "3.5" -> 3.5
 function parsePrice(raw) {
   let cleaned = raw.trim().replace(",", ".");
   if (/^\d+\s+\d{1,2}$/.test(cleaned)) cleaned = cleaned.replace(/\s+/, ".");
@@ -146,13 +147,13 @@ function randomSuggestions(menuItems, excludeId, count = 2) {
   return shuffled.slice(0, count);
 }
 
-// El producto trae una bebida incluida si la palabra "cola" aparece en su nombre o descripción
+// Detecta si incluye bebida para no cobrarla
 function itemIncludesDrink(item) {
   return /cola/i.test(`${item.name} ${item.desc || ""}`);
 }
 
 function generateCode(prefix = "") {
-  return prefix + String(Math.floor(100 + Math.random() * 900)); // 3 dígitos
+  return prefix + String(Math.floor(100 + Math.random() * 900)); 
 }
 
 // ============ SESIONES DE CONVERSACIÓN ============
@@ -175,18 +176,123 @@ function logClient(session, text) {
   session.chatHistory.push({ sender: "client", text });
 }
 
+// ============ FUNCIONES DE FLUJO AUXILIARES ============
+
+async function processNextPendingMainItem(phone, session) {
+  if (!session.data.pendingMainItems || session.data.pendingMainItems.length === 0) {
+    // Ya procesamos principales (y sus bebidas incluidas). Pasamos a acompañantes.
+    const { menuItems } = await getBusinessConfig();
+    const hasBurger = session.data.items.some(i => i.category === 'burger');
+    session.step = "sides";
+    await sendSidesMenu(phone, session, menuItems, hasBurger);
+    return;
+  }
+  
+  const currentItem = session.data.pendingMainItems[0];
+
+  // Si ya sabemos la cantidad (ej. vino del Catálogo de WhatsApp)
+  if (currentItem.qty) {
+    session.data.items.push(currentItem);
+    session.data.foodTotal = (session.data.foodTotal || 0) + (currentItem.price * currentItem.qty);
+
+    if (itemIncludesDrink(currentItem)) {
+      const { menuItems } = await getBusinessConfig();
+      const drinks = menuItems.filter((i) => i.category === "drink" && i.available);
+      session.data.comboDrinkOptions = drinks;
+      session.step = "combo_drink_flavor";
+      const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
+      await replyAndLog(phone, session, `Tu producto "${currentItem.name}" incluye bebida 🥤 ¿Cuál prefieres?\n\n${listado}`);
+      return;
+    } else {
+      // Si no incluye bebida, procesamos el siguiente
+      session.data.pendingMainItems.shift();
+      return processNextPendingMainItem(phone, session);
+    }
+  }
+
+  // Si no sabemos la cantidad (flujo de texto normal)
+  session.step = "quantity";
+  await replyAndLog(phone, session, `¿Cuántas unidades de "${currentItem.name}" deseas?`);
+}
+
+async function sendSidesMenu(phone, session, menuItems, hasBurger) {
+  const sides = menuItems.filter((i) => i.category === "other" && i.available);
+  session.data.sidesOptions = sides;
+  
+  if (sides.length === 0) {
+    await goToDrinkStepOrDelivery(phone, session);
+    return;
+  }
+  
+  const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
+  
+  // Mensaje inteligente de sugerencia si detecta que pidió hamburguesas
+  let msg = hasBurger 
+    ? `Notamos que pediste hamburguesas 🍔 ¿Deseas acompañar tu pedido con unas papas o extras?\n\n${listado}\n\nResponde con el número de la opción, o *0* si no deseas nada más.`
+    : `¿Deseas acompañar tu pedido con algo de esto?\n\n${listado}\n\nResponde con el número de la opción, o *0* si no deseas nada más.`;
+
+  await replyAndLog(phone, session, msg);
+}
+
+async function goToDrinkStepOrDelivery(phone, session) {
+  session.step = "drink_yn";
+  await replyAndLog(phone, session, "¿Deseas agregar una *bebida extra* a tu pedido?\n1. Sí\n2. No");
+}
+
+async function askDeliveryType(phone, session, botConfig) {
+  session.step = "delivery_type";
+  if (botConfig.upsellMsg) await replyAndLog(phone, session, botConfig.upsellMsg);
+  await replyAndLog(phone, session, "¡Excelente! Ya tenemos todo lo que necesitas.\n\n¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
+}
+
+async function sendPaymentInfo(phone, session, bankHolders) {
+  const total = session.data.foodTotal + (session.data.deliveryFee || 0);
+  const cuentas = formatBankAccountsForChat(bankHolders);
+  let msg = `El total de tu pedido es $${session.data.foodTotal.toFixed(2)}`;
+  if (session.data.deliveryFee > 0) {
+    msg += ` + $${session.data.deliveryFee.toFixed(2)} de envío = $${total.toFixed(2)}`;
+  }
+  msg += `\n\nEl total del pedido se paga por transferencia a:${cuentas}\n\nCuando termines, envíame la *foto del comprobante* por aquí para confirmar tu pedido 📸. (El motorizado solo entrega el pedido).`;
+  await replyAndLog(phone, session, msg);
+}
+
 // ============ CONVERSACIÓN CON EL CLIENTE ============
 
-async function handleIncomingMessage(phone, text, isImage, isLocation, locationLink, mediaId) {
+async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId) {
   const { menuItems, botConfig, bankHolders } = await getBusinessConfig();
   let session = await getSession(phone);
-  const entrada = isImage ? "(imagen)" : isLocation ? "(ubicación compartida)" : text;
+  
+  let entrada = text;
+  if (isImage) entrada = "(imagen)";
+  if (isLocation) entrada = "(ubicación compartida)";
+  if (isOrder) entrada = "(carrito de compras recibido)";
 
-  // --- Inicio de conversación ---
-  if (!session) {
-    session = { step: "menu", data: {}, chatHistory: [] };
+  // --- Inicio de conversación (o si mandan un carrito directo) ---
+  if (!session || (isOrder && session.step === "menu")) {
+    session = session || { step: "menu", data: {}, chatHistory: [] };
     logClient(session, entrada);
-    await replyAndLog(phone, session, botConfig.welcomeMsg || "¡Hola! Bienvenido a Salinas Burger 🍔");
+
+    if (isOrder && orderData) {
+      // Manejo de orden nativa (Catálogo de WhatsApp con botones + y -)
+      let cartItems = [];
+      for (let oItem of orderData.product_items) {
+        let dbItem = menuItems.find(m => String(m.id) === String(oItem.product_retailer_id));
+        if (dbItem) cartItems.push({ ...dbItem, qty: oItem.quantity });
+      }
+      if (cartItems.length > 0) {
+        session.data.pendingMainItems = cartItems;
+        session.data.items = [];
+        session.data.foodTotal = 0;
+        await replyAndLog(phone, session, "¡Recibimos tu carrito de compras! 🛒");
+        await processNextPendingMainItem(phone, session);
+        await saveSession(phone, session);
+        return;
+      }
+    }
+
+    if (!session.chatHistory.length) {
+      await replyAndLog(phone, session, botConfig.welcomeMsg || "¡Hola! Bienvenido a Salinas Burger 🍔");
+    }
 
     if (botConfig.menuPdfUrl) {
       await sendWhatsAppDocument(phone, botConfig.menuPdfUrl, botConfig.menuPdfName || "Menu.pdf");
@@ -199,60 +305,71 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
       await clearSession(phone);
       return;
     }
+    
     session.data.opciones = disponibles;
     const listado = disponibles
       .map((b, i) => `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`)
       .join("\n");
-    await replyAndLog(phone, session, `Este es nuestro menú:\n\n${listado}\n\nResponde con el número que deseas.`);
+      
+    await replyAndLog(phone, session, `Este es nuestro menú principal:\n\n${listado}\n\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n\n*(Si tienes nuestro Catálogo de WhatsApp, puedes añadir al carrito directamente)*`);
     await saveSession(phone, session);
     return;
   }
 
   logClient(session, entrada);
 
-  // --- Paso: eligiendo hamburguesa o combo ---
+  // --- Paso: eligiendo hamburguesa o combo (Texto normal) ---
   if (session.step === "menu") {
-    const idx = parseInt(text, 10) - 1;
     const opciones = session.data.opciones || [];
+    const matches = text.match(/\d+/g);
+    let selectedItems = [];
 
-    if (!isNaN(idx) && opciones[idx]) {
-      await selectMainItem(phone, session, opciones[idx], botConfig);
-      await saveSession(phone, session);
-      return;
-    }
-
-    // No fue un número válido: intenta reconocer el nombre de un producto (aunque esté en pausa)
-    const match = menuItems.find(
-      (i) => (i.category === "burger" || i.category === "combo") && normalizeText(i.name).includes(normalizeText(text))
-    );
-    if (match && !match.available) {
-      const sugerencias = randomSuggestions(menuItems, match.id);
-      const listadoSug = sugerencias.map((s) => `- ${s.name} ($${s.price.toFixed(2)})`).join("\n");
-      await replyAndLog(
-        phone,
-        session,
-        `${botConfig.soldOutMsg || `Lo sentimos, "${match.name}" no está disponible por ahora.`}\n\n${
-          sugerencias.length ? `Te sugerimos:\n${listadoSug}\n\n` : ""
-        }Responde con el número de alguna opción del menú que te mostramos arriba.`
-      );
-      await saveSession(phone, session);
-      return;
-    }
-    if (match && match.available) {
-      const realIdx = opciones.findIndex((o) => o.id === match.id);
-      if (realIdx >= 0) {
-        await selectMainItem(phone, session, opciones[realIdx], botConfig);
-        await saveSession(phone, session);
-        return;
+    if (matches && matches.length > 0) {
+      for (let numStr of matches) {
+        const idx = parseInt(numStr, 10) - 1;
+        if (opciones[idx] && !selectedItems.find((i) => i.id === opciones[idx].id)) {
+          selectedItems.push(opciones[idx]);
+        }
       }
     }
 
-    await replyAndLog(phone, session, "No entendí esa opción 🙁 Responde con el número del producto de la lista.");
+    if (selectedItems.length === 0) {
+      const match = menuItems.find(
+        (i) => (i.category === "burger" || i.category === "combo") && normalizeText(i.name).includes(normalizeText(text))
+      );
+      if (match) {
+        if (!match.available) {
+          const sugerencias = randomSuggestions(menuItems, match.id);
+          const listadoSug = sugerencias.map((s) => `- ${s.name} ($${s.price.toFixed(2)})`).join("\n");
+          await replyAndLog(
+            phone,
+            session,
+            `${botConfig.soldOutMsg || `Lo sentimos, "${match.name}" no está disponible por ahora.`}\n\n${
+              sugerencias.length ? `Te sugerimos:\n${listadoSug}\n\n` : ""
+            }Responde con el número de alguna opción.`
+          );
+          await saveSession(phone, session);
+          return;
+        }
+        selectedItems.push(match);
+      }
+    }
+
+    if (selectedItems.length > 0) {
+      session.data.pendingMainItems = selectedItems;
+      session.data.items = [];
+      session.data.foodTotal = 0;
+      await processNextPendingMainItem(phone, session);
+      await saveSession(phone, session);
+      return;
+    }
+
+    await replyAndLog(phone, session, "No entendí esa opción 🙁 Responde con el número(s) del producto de la lista (ej: 1, o 1 y 3).");
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: cantidad del producto principal ---
+  // --- Paso: cantidad del producto principal (Texto normal) ---
   if (session.step === "quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
@@ -260,26 +377,25 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
       await saveSession(phone, session);
       return;
     }
-    const item = session.data.items[0];
-    item.qty = qty;
-    session.data.foodTotal = item.price * qty;
-
-    if (itemIncludesDrink(item)) {
-      const drinks = menuItems.filter((i) => i.category === "drink" && i.available);
-      session.data.comboDrinkOptions = drinks;
-      session.step = "combo_drink_flavor";
-      const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
-      await replyAndLog(phone, session, `Tu pedido incluye una bebida 🥤 ¿Cuál prefieres?\n\n${listado}`);
-      await saveSession(phone, session);
-      return;
+    
+    const currentItem = session.data.pendingMainItems.shift(); // Lo sacamos de la cola
+    
+    if (itemIncludesDrink(currentItem)) {
+      // Si pidió ej: 3 combos, los separamos en 3 items de qty: 1 para preguntarle el sabor de CADA UNO.
+      for (let i = 0; i < qty; i++) {
+         session.data.pendingMainItems.unshift({ ...currentItem, qty: 1 });
+      }
+    } else {
+      session.data.items.push({ ...currentItem, qty });
+      session.data.foodTotal = (session.data.foodTotal || 0) + (currentItem.price * qty);
     }
-
-    await continueAfterMainItem(phone, session, botConfig);
+    
+    await processNextPendingMainItem(phone, session);
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: sabor de la bebida incluida ---
+  // --- Paso: sabor de la bebida INCLUIDA (Costo $0) ---
   if (session.step === "combo_drink_flavor") {
     const idx = parseInt(text, 10) - 1;
     const drinks = session.data.comboDrinkOptions || [];
@@ -288,73 +404,69 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
       await saveSession(phone, session);
       return;
     }
-    session.data.items.push({ ...drinks[idx], price: 0, qty: 1, incluida: true });
-    session.data.includesDrink = true;
-    await continueAfterMainItem(phone, session, botConfig);
-    await saveSession(phone, session);
-    return;
-  }
+    
+    // Eliminamos el item procesado y lo añadimos con la bebida
+    const currentItem = session.data.pendingMainItems.shift(); 
+    
+    // Aquí es donde se asegura que la bebida incluida NO SE COBRE (price: 0)
+    session.data.items.push({ 
+      ...drinks[idx], 
+      price: 0, 
+      qty: 1, 
+      incluida: true,
+      name: `${drinks[idx].name} (para ${currentItem.name})` // Referencia para la cocina
+    });
 
-  // --- Paso: domicilio o retiro ---
-  if (session.step === "delivery_type") {
-    if (text === "1" || isLocation) {
-      session.data.deliveryType = "domicilio";
-      if (isLocation) {
-        await requestDeliveryQuote(phone, session, botConfig, locationLink);
-      } else {
-        session.step = "address";
-        await replyAndLog(phone, session, "Perfecto, ¿cuál es tu dirección o sector de entrega? (o comparte tu ubicación de WhatsApp 📍)");
-      }
-    } else if (text === "2") {
-      session.data.deliveryType = "retiro";
-      session.data.deliveryFee = 0;
-      session.step = "sides";
-      await sendSidesMenu(phone, session, menuItems);
-    } else {
-      await replyAndLog(phone, session, "Responde 1 para Domicilio o 2 para Retirar en tienda (o comparte tu ubicación 📍).");
-    }
-    await saveSession(phone, session);
-    return;
-  }
-
-  // --- Paso: dirección ---
-  if (session.step === "address") {
-    const address = isLocation ? locationLink : text;
-    await requestDeliveryQuote(phone, session, botConfig, address);
-    await saveSession(phone, session);
-    return;
-  }
-
-  // --- Paso: esperando el precio del envío (lo resuelve el dueño) ---
-  if (session.step === "awaiting_delivery_price") {
-    await replyAndLog(phone, session, "Seguimos cotizando tu envío con nuestro motorizado, un momento por favor 🛵");
+    await processNextPendingMainItem(phone, session);
     await saveSession(phone, session);
     return;
   }
 
   // --- Paso: adicionales/acompañantes ---
   if (session.step === "sides") {
-    const sides = session.data.sidesOptions || [];
-    if (text !== "0") {
-      const idx = parseInt(text, 10) - 1;
-      if (isNaN(idx) || !sides[idx]) {
-        await replyAndLog(phone, session, "Responde con el número de la opción, o 0 si no deseas ninguna.");
-        await saveSession(phone, session);
-        return;
-      }
-      session.data.items.push({ ...sides[idx], qty: 1 });
-      session.data.foodTotal += sides[idx].price;
+    if (text === "0") {
+      await goToDrinkStepOrDelivery(phone, session);
+      await saveSession(phone, session);
+      return;
     }
-    await goToDrinkStepOrPayment(phone, session, bankHolders);
+    const sides = session.data.sidesOptions || [];
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !sides[idx]) {
+      await replyAndLog(phone, session, "Responde con el número de la opción, o 0 si no deseas ninguna.");
+      await saveSession(phone, session);
+      return;
+    }
+    session.data.currentSide = sides[idx];
+    session.step = "side_quantity";
+    await replyAndLog(phone, session, `¿Cuántas unidades de "${sides[idx].name}" deseas agregar?`);
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: quiere bebida sí/no ---
+  // --- Paso: cantidad del acompañante ---
+  if (session.step === "side_quantity") {
+    const qty = parseInt(text, 10);
+    if (isNaN(qty) || qty < 1 || qty > 20) {
+      await replyAndLog(phone, session, "Escribe un número válido de unidades.");
+      await saveSession(phone, session);
+      return;
+    }
+    const side = session.data.currentSide;
+    session.data.items.push({ ...side, qty });
+    session.data.foodTotal += side.price * qty;
+
+    // Volver a mostrar el menú de acompañantes por si quiere otro
+    const hasBurger = session.data.items.some(i => i.category === 'burger');
+    session.step = "sides";
+    await sendSidesMenu(phone, session, menuItems, hasBurger);
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: quiere bebida EXTRA sí/no ---
   if (session.step === "drink_yn") {
     if (text === "2") {
-      session.step = "payment";
-      await sendPaymentInfo(phone, session, bankHolders);
+      await askDeliveryType(phone, session, botConfig);
     } else if (text === "1") {
       const drinks = menuItems.filter((i) => i.category === "drink" && i.available);
       const capacidades = [...new Set(drinks.map((d) => d.volume || "Personal"))];
@@ -399,10 +511,65 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
       await saveSession(phone, session);
       return;
     }
-    session.data.items.push({ ...drinks[idx], qty: 1 });
-    session.data.foodTotal += drinks[idx].price;
-    session.step = "payment";
-    await sendPaymentInfo(phone, session, bankHolders);
+    session.data.currentDrink = drinks[idx];
+    session.step = "drink_quantity";
+    await replyAndLog(phone, session, `¿Cuántas unidades de "${drinks[idx].name}" deseas?`);
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: cantidad de bebida EXTRA (Esta SÍ se cobra) ---
+  if (session.step === "drink_quantity") {
+    const qty = parseInt(text, 10);
+    if (isNaN(qty) || qty < 1 || qty > 20) {
+      await replyAndLog(phone, session, "Escribe un número válido de unidades.");
+      await saveSession(phone, session);
+      return;
+    }
+    const drink = session.data.currentDrink;
+    // Se añade al carrito y se cobra el precio normalmente
+    session.data.items.push({ ...drink, qty });
+    session.data.foodTotal += drink.price * qty;
+
+    session.step = "drink_yn";
+    await replyAndLog(phone, session, "¿Deseas agregar otra bebida extra?\n1. Sí\n2. No");
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: domicilio o retiro ---
+  if (session.step === "delivery_type") {
+    if (text === "1" || isLocation) {
+      session.data.deliveryType = "domicilio";
+      if (isLocation) {
+        await requestDeliveryQuote(phone, session, botConfig, locationLink);
+      } else {
+        session.step = "address";
+        await replyAndLog(phone, session, "Perfecto, ¿cuál es tu dirección o sector de entrega? (o comparte tu ubicación de WhatsApp 📍)");
+      }
+    } else if (text === "2") {
+      session.data.deliveryType = "retiro";
+      session.data.deliveryFee = 0;
+      session.step = "payment";
+      await sendPaymentInfo(phone, session, bankHolders);
+    } else {
+      await replyAndLog(phone, session, "Responde 1 para Domicilio o 2 para Retirar en tienda (o comparte tu ubicación 📍).");
+    }
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: dirección ---
+  if (session.step === "address") {
+    const address = isLocation ? locationLink : text;
+    await requestDeliveryQuote(phone, session, botConfig, address);
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: esperando el precio del envío (lo resuelve el dueño) ---
+  if (session.step === "awaiting_delivery_price") {
+    await replyAndLog(phone, session, "Seguimos cotizando tu envío con nuestro motorizado, un momento por favor 🛵");
     await saveSession(phone, session);
     return;
   }
@@ -427,51 +594,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
   }
 }
 
-async function selectMainItem(phone, session, item, botConfig) {
-  session.data.items = [item];
-  session.step = "quantity";
-  await replyAndLog(phone, session, `¿Cuántas unidades de "${item.name}" deseas?`);
-}
-
-async function continueAfterMainItem(phone, session, botConfig) {
-  session.step = "delivery_type";
-  if (botConfig.upsellMsg) await replyAndLog(phone, session, botConfig.upsellMsg);
-  await replyAndLog(phone, session, "¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
-}
-
-async function goToDrinkStepOrPayment(phone, session, bankHolders) {
-  if (session.data.includesDrink) {
-    session.step = "payment";
-    await sendPaymentInfo(phone, session, bankHolders);
-  } else {
-    session.step = "drink_yn";
-    await replyAndLog(phone, session, "¿Deseas agregar una bebida?\n1. Sí\n2. No");
-  }
-}
-
-async function sendSidesMenu(phone, session, menuItems) {
-  const sides = menuItems.filter((i) => i.category === "other" && i.available);
-  session.data.sidesOptions = sides;
-  if (sides.length === 0) {
-    await goToDrinkStepOrPayment(phone, session, null);
-    return;
-  }
-  const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
-  await replyAndLog(phone, session, `¿Deseas acompañar tu pedido con algo de esto?\n\n${listado}\n\nResponde con el número, o 0 si no deseas ninguna.`);
-}
-
-async function sendPaymentInfo(phone, session, bankHolders) {
-  const total = session.data.foodTotal + (session.data.deliveryFee || 0);
-  const cuentas = formatBankAccountsForChat(bankHolders);
-  let msg = `El total de tu pedido es $${session.data.foodTotal.toFixed(2)}`;
-  if (session.data.deliveryFee > 0) {
-    msg += ` + $${session.data.deliveryFee.toFixed(2)} de envío (en efectivo al motorizado) = $${total.toFixed(2)}`;
-  }
-  msg += `\n\nEl total del pedido se paga por transferencia a:${cuentas}\n\nCuando termines, envíame la foto del comprobante para confirmar tu pedido.`;
-  await replyAndLog(phone, session, msg);
-}
-
-// --- Pide la cotización del envío al dueño, con un código de pedido para identificarlo ---
+// --- Pide la cotización del envío al dueño ---
 async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicacion) {
   const ownerPhone = botConfig.ownerPhone;
   const code = generateCode();
@@ -493,8 +616,6 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
       ownerPhone,
       `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo: #${code} <precio>\n(ej: #${code} 3 0 para $3.00)`
     );
-  } else {
-    console.error("⚠️ No hay un ownerPhone configurado — no se pudo avisar del envío.");
   }
 }
 
@@ -516,8 +637,6 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
       mediaId,
       `🧾 Comprobante de pago\nPedido #${code}\nCliente: ${phone}\nTotal: $${total.toFixed(2)}\n\nResponde: #${code} ok (confirmar) o #${code} no (rechazar)`
     );
-  } else {
-    console.error("⚠️ No se pudo reenviar el comprobante al dueño (falta ownerPhone o mediaId).");
   }
 }
 
@@ -562,8 +681,9 @@ async function resolveDeliveryQuote(code, rest, ownerPhone) {
   session.data.deliveryFee = price;
   await replyAndLog(phone, session, `El envío tiene un valor de $${price.toFixed(2)}, se paga en *efectivo* directo al motorizado 🛵`);
 
-  const { menuItems } = await getBusinessConfig();
-  await sendSidesMenu(phone, session, menuItems);
+  session.step = "payment";
+  const { bankHolders } = await getBusinessConfig();
+  await sendPaymentInfo(phone, session, bankHolders);
   await saveSession(phone, session);
 
   if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Envié $${price.toFixed(2)} al cliente del pedido #${code}.`);
@@ -604,14 +724,22 @@ async function finalizeOrder(phone, session) {
     .map((i) => `${i.qty || 1}x ${i.name}${i.incluida ? " (incluida)" : ""}${i.volume ? ` (${i.volume})` : ""} ($${i.price.toFixed(2)} c/u)`)
     .join(", ");
 
+  const snapshot = await ORDERS_COL.get();
+  const orderNumber = snapshot.size + 1;
+  const generatedCode = `#${orderNumber}`;
+  
+  const numericalFoodTotal = parseFloat(foodTotal) || 0;
+  const numericalDeliveryFee = parseFloat(deliveryFee) || 0;
+
   await ORDERS_COL.add({
-    code: `WA-${Date.now()}`,
+    code: generatedCode,
     client: phone,
     phone,
     sector: deliveryType === "domicilio" ? address : "Retiro en tienda",
     items: itemsSummary,
-    foodTotal,
-    deliveryFee: deliveryFee || 0,
+    foodTotal: numericalFoodTotal,
+    deliveryFee: numericalDeliveryFee,
+    total: numericalFoodTotal + numericalDeliveryFee, 
     status: "process",
     startTime: Date.now(),
     dispatchTime: null,
@@ -621,8 +749,10 @@ async function finalizeOrder(phone, session) {
     source: "whatsapp_bot",
   });
 
-  console.log(`✅ Pedido confirmado y guardado para ${phone}`);
+  console.log(`✅ Pedido ${generatedCode} guardado para ${phone}`);
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
+
+```eof
