@@ -76,7 +76,7 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const isImage = message.type === "image";
     const isLocation = message.type === "location";
-    const isOrder = message.type === "order"; // Detección de Carrito de Catálogo
+    const isOrder = message.type === "order"; 
     const mediaId = isImage ? message.image?.id : null;
     const text = message.text?.body?.trim() || "";
     const orderData = isOrder ? message.order : null;
@@ -147,7 +147,6 @@ function randomSuggestions(menuItems, excludeId, count = 2) {
   return shuffled.slice(0, count);
 }
 
-// Detecta si incluye bebida para no cobrarla
 function itemIncludesDrink(item) {
   return /cola/i.test(`${item.name} ${item.desc || ""}`);
 }
@@ -180,7 +179,6 @@ function logClient(session, text) {
 
 async function processNextPendingMainItem(phone, session) {
   if (!session.data.pendingMainItems || session.data.pendingMainItems.length === 0) {
-    // Ya procesamos principales (y sus bebidas incluidas). Pasamos a acompañantes.
     const { menuItems } = await getBusinessConfig();
     const hasBurger = session.data.items.some(i => i.category === 'burger');
     session.step = "sides";
@@ -190,7 +188,6 @@ async function processNextPendingMainItem(phone, session) {
   
   const currentItem = session.data.pendingMainItems[0];
 
-  // Si ya sabemos la cantidad (ej. vino del Catálogo de WhatsApp)
   if (currentItem.qty) {
     session.data.items.push(currentItem);
     session.data.foodTotal = (session.data.foodTotal || 0) + (currentItem.price * currentItem.qty);
@@ -204,13 +201,11 @@ async function processNextPendingMainItem(phone, session) {
       await replyAndLog(phone, session, `Tu producto "${currentItem.name}" incluye bebida 🥤 ¿Cuál prefieres?\n\n${listado}`);
       return;
     } else {
-      // Si no incluye bebida, procesamos el siguiente
       session.data.pendingMainItems.shift();
       return processNextPendingMainItem(phone, session);
     }
   }
 
-  // Si no sabemos la cantidad (flujo de texto normal)
   session.step = "quantity";
   await replyAndLog(phone, session, `¿Cuántas unidades de "${currentItem.name}" deseas?`);
 }
@@ -226,7 +221,6 @@ async function sendSidesMenu(phone, session, menuItems, hasBurger) {
   
   const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
   
-  // Mensaje inteligente de sugerencia si detecta que pidió hamburguesas
   let msg = hasBurger 
     ? `Notamos que pediste hamburguesas 🍔 ¿Deseas acompañar tu pedido con unas papas o extras?\n\n${listado}\n\nResponde con el número de la opción, o *0* si no deseas nada más.`
     : `¿Deseas acompañar tu pedido con algo de esto?\n\n${listado}\n\nResponde con el número de la opción, o *0* si no deseas nada más.`;
@@ -260,6 +254,14 @@ async function sendPaymentInfo(phone, session, bankHolders) {
 
 async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId) {
   const { menuItems, botConfig, bankHolders } = await getBusinessConfig();
+  
+  // --- PALABRA DE ESCAPE / REINICIO MANUAL ---
+  if (text.toLowerCase() === "reiniciar" || text.toLowerCase() === "cancelar") {
+    await clearSession(phone);
+    await sendWhatsAppText(phone, "✅ Tu pedido anterior ha sido cancelado. Envía cualquier mensaje (como 'Hola') para empezar uno nuevo 🍔");
+    return;
+  }
+
   let session = await getSession(phone);
   
   let entrada = text;
@@ -267,13 +269,12 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   if (isLocation) entrada = "(ubicación compartida)";
   if (isOrder) entrada = "(carrito de compras recibido)";
 
-  // --- Inicio de conversación (o si mandan un carrito directo) ---
+  // --- Inicio de conversación ---
   if (!session || (isOrder && session.step === "menu")) {
     session = session || { step: "menu", data: {}, chatHistory: [] };
     logClient(session, entrada);
 
     if (isOrder && orderData) {
-      // Manejo de orden nativa (Catálogo de WhatsApp con botones + y -)
       let cartItems = [];
       for (let oItem of orderData.product_items) {
         let dbItem = menuItems.find(m => String(m.id) === String(oItem.product_retailer_id));
@@ -311,14 +312,15 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       .map((b, i) => `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`)
       .join("\n");
       
-    await replyAndLog(phone, session, `Este es nuestro menú principal:\n\n${listado}\n\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n\n*(Si tienes nuestro Catálogo de WhatsApp, puedes añadir al carrito directamente)*`);
+    // 💡 AVISO DE CANCELAR EN EL MENÚ INICIAL
+    await replyAndLog(phone, session, `Este es nuestro menú principal:\n\n${listado}\n\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n\n*(💡 Tip: Si te equivocas en tu pedido, puedes escribir "cancelar" en cualquier momento)*`);
     await saveSession(phone, session);
     return;
   }
 
   logClient(session, entrada);
 
-  // --- Paso: eligiendo hamburguesa o combo (Texto normal) ---
+  // --- Paso: eligiendo hamburguesa o combo ---
   if (session.step === "menu") {
     const opciones = session.data.opciones || [];
     const matches = text.match(/\d+/g);
@@ -364,24 +366,25 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       return;
     }
 
-    await replyAndLog(phone, session, "No entendí esa opción 🙁 Responde con el número(s) del producto de la lista (ej: 1, o 1 y 3).");
+    // 💡 AVISO DE CANCELAR CUANDO EL BOT NO ENTIENDE LA OPCIÓN
+    await replyAndLog(phone, session, "No entendí esa opción 🙁 Responde con el número del producto de la lista.\n*(O escribe la palabra 'cancelar' para empezar de nuevo)*");
     await saveSession(phone, session);
     return;
   }
 
-  // --- Paso: cantidad del producto principal (Texto normal) ---
+  // --- Paso: cantidad del producto principal ---
   if (session.step === "quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
-      await replyAndLog(phone, session, "Escribe un número válido de unidades (ej. 1, 2, 3...).");
+      // 💡 AVISO DE CANCELAR CUANDO ESCRIBE MAL LA CANTIDAD
+      await replyAndLog(phone, session, "Escribe un número válido de unidades (ej. 1, 2, 3...).\n*(O escribe la palabra 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
     
-    const currentItem = session.data.pendingMainItems.shift(); // Lo sacamos de la cola
+    const currentItem = session.data.pendingMainItems.shift(); 
     
     if (itemIncludesDrink(currentItem)) {
-      // Si pidió ej: 3 combos, los separamos en 3 items de qty: 1 para preguntarle el sabor de CADA UNO.
       for (let i = 0; i < qty; i++) {
          session.data.pendingMainItems.unshift({ ...currentItem, qty: 1 });
       }
@@ -395,26 +398,24 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: sabor de la bebida INCLUIDA (Costo $0) ---
+  // --- Paso: sabor de la bebida INCLUIDA ---
   if (session.step === "combo_drink_flavor") {
     const idx = parseInt(text, 10) - 1;
     const drinks = session.data.comboDrinkOptions || [];
     if (isNaN(idx) || !drinks[idx]) {
-      await replyAndLog(phone, session, "Responde con el número de la bebida de la lista.");
+      await replyAndLog(phone, session, "Responde con el número de la bebida de la lista.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
     
-    // Eliminamos el item procesado y lo añadimos con la bebida
     const currentItem = session.data.pendingMainItems.shift(); 
     
-    // Aquí es donde se asegura que la bebida incluida NO SE COBRE (price: 0)
     session.data.items.push({ 
       ...drinks[idx], 
       price: 0, 
       qty: 1, 
       incluida: true,
-      name: `${drinks[idx].name} (para ${currentItem.name})` // Referencia para la cocina
+      name: `${drinks[idx].name} (para ${currentItem.name})`
     });
 
     await processNextPendingMainItem(phone, session);
@@ -432,7 +433,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const sides = session.data.sidesOptions || [];
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || !sides[idx]) {
-      await replyAndLog(phone, session, "Responde con el número de la opción, o 0 si no deseas ninguna.");
+      await replyAndLog(phone, session, "Responde con el número de la opción, o 0 si no deseas ninguna.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
@@ -447,7 +448,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   if (session.step === "side_quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
-      await replyAndLog(phone, session, "Escribe un número válido de unidades.");
+      await replyAndLog(phone, session, "Escribe un número válido de unidades.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
@@ -455,7 +456,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     session.data.items.push({ ...side, qty });
     session.data.foodTotal += side.price * qty;
 
-    // Volver a mostrar el menú de acompañantes por si quiere otro
     const hasBurger = session.data.items.some(i => i.category === 'burger');
     session.step = "sides";
     await sendSidesMenu(phone, session, menuItems, hasBurger);
@@ -475,7 +475,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       const listado = capacidades.map((c, i) => `${i + 1}. ${c}`).join("\n");
       await replyAndLog(phone, session, `¿Qué presentación prefieres?\n\n${listado}`);
     } else {
-      await replyAndLog(phone, session, "Responde 1 para Sí o 2 para No.");
+      await replyAndLog(phone, session, "Responde 1 para Sí o 2 para No.\n*(O escribe 'cancelar' para empezar de nuevo)*");
     }
     await saveSession(phone, session);
     return;
@@ -486,7 +486,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const idx = parseInt(text, 10) - 1;
     const capacidades = session.data.drinkCapacities || [];
     if (isNaN(idx) || !capacidades[idx]) {
-      await replyAndLog(phone, session, "Responde con el número de la presentación de la lista.");
+      await replyAndLog(phone, session, "Responde con el número de la presentación de la lista.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
@@ -507,7 +507,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const idx = parseInt(text, 10) - 1;
     const drinks = session.data.drinkOptions || [];
     if (isNaN(idx) || !drinks[idx]) {
-      await replyAndLog(phone, session, "Responde con el número de la bebida de la lista.");
+      await replyAndLog(phone, session, "Responde con el número de la bebida de la lista.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
@@ -518,16 +518,15 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: cantidad de bebida EXTRA (Esta SÍ se cobra) ---
+  // --- Paso: cantidad de bebida EXTRA ---
   if (session.step === "drink_quantity") {
     const qty = parseInt(text, 10);
     if (isNaN(qty) || qty < 1 || qty > 20) {
-      await replyAndLog(phone, session, "Escribe un número válido de unidades.");
+      await replyAndLog(phone, session, "Escribe un número válido de unidades.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
     }
     const drink = session.data.currentDrink;
-    // Se añade al carrito y se cobra el precio normalmente
     session.data.items.push({ ...drink, qty });
     session.data.foodTotal += drink.price * qty;
 
@@ -553,7 +552,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       session.step = "payment";
       await sendPaymentInfo(phone, session, bankHolders);
     } else {
-      await replyAndLog(phone, session, "Responde 1 para Domicilio o 2 para Retirar en tienda (o comparte tu ubicación 📍).");
+      await replyAndLog(phone, session, "Responde 1 para Domicilio o 2 para Retirar en tienda (o comparte tu ubicación 📍).\n*(O escribe 'cancelar' para empezar de nuevo)*");
     }
     await saveSession(phone, session);
     return;
@@ -567,9 +566,10 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     return;
   }
 
-  // --- Paso: esperando el precio del envío (lo resuelve el dueño) ---
+  // --- Paso: esperando el precio del envío ---
   if (session.step === "awaiting_delivery_price") {
-    await replyAndLog(phone, session, "Seguimos cotizando tu envío con nuestro motorizado, un momento por favor 🛵");
+    // 💡 AVISO DE CANCELAR CUANDO ESTÁ ESPERANDO EL ENVÍO Y ESCRIBE ALGO
+    await replyAndLog(phone, session, "Seguimos cotizando tu envío con nuestro motorizado, un momento por favor 🛵.\n\n*(Si ya no deseas esperar o quieres modificar tu pedido, escribe 'cancelar')*");
     await saveSession(phone, session);
     return;
   }
@@ -577,7 +577,8 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   // --- Paso: esperando comprobante ---
   if (session.step === "payment") {
     if (!isImage) {
-      await replyAndLog(phone, session, "Cuando realices la transferencia, envíame la *foto o captura* del comprobante para confirmar tu pedido 📸");
+      // 💡 AVISO DE CANCELAR CUANDO SE DEMORA CON EL COMPROBANTE
+      await replyAndLog(phone, session, "Para confirmar tu pedido, envíame la *foto o captura* de la transferencia 📸.\n\n*(Si tuviste un problema y deseas anular este pedido, escribe 'cancelar')*");
       await saveSession(phone, session);
       return;
     }
@@ -588,7 +589,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
 
   // --- Paso: esperando que el dueño apruebe el comprobante ---
   if (session.step === "awaiting_approval") {
-    await replyAndLog(phone, session, "Estamos verificando tu comprobante, un momento por favor 🙏");
+    await replyAndLog(phone, session, "Estamos verificando tu comprobante, un momento por favor 🙏.\n*(Escribe 'cancelar' si necesitas anular el pedido)*");
     await saveSession(phone, session);
     return;
   }
@@ -640,7 +641,7 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
   }
 }
 
-// --- Procesa la respuesta del dueño: cotización de envío O aprobación de comprobante ---
+// --- Procesa la respuesta del dueño ---
 async function handleOwnerReply(text) {
   const { botConfig } = await getBusinessConfig();
   const ownerPhone = botConfig.ownerPhone;
@@ -754,5 +755,3 @@ async function finalizeOrder(phone, session) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
-
-```eof
