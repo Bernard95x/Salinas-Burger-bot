@@ -151,6 +151,14 @@ function itemIncludesDrink(item) {
   return /cola/i.test(`${item.name} ${item.desc || ""}`);
 }
 
+// Detecta qué valor de "volume" usan las bebidas Personales en este menú (ej. "300 ml"),
+// buscando cualquier bebida cuyo nombre diga "Personal", y devuelve solo esas opciones disponibles.
+function getPersonalDrinkOptions(menuItems) {
+  const ejemploPersonal = menuItems.find((i) => i.category === "drink" && /personal/i.test(i.name));
+  const volumenPersonal = ejemploPersonal ? ejemploPersonal.volume || "Personal" : "Personal";
+  return menuItems.filter((i) => i.category === "drink" && i.available && (i.volume || "Personal") === volumenPersonal);
+}
+
 // Busca en TODO el menú (disponible o no) algo que coincida con el texto del cliente, dentro de las categorías dadas.
 // Si encuentra algo en pausa, devuelve el mensaje de "agotado" + sugerencias al azar de lo que sí está disponible.
 async function tryMatchUnavailable(phone, session, botConfig, menuItems, text, categorias) {
@@ -169,8 +177,25 @@ async function tryMatchUnavailable(phone, session, botConfig, menuItems, text, c
   return true; // ya se respondió, no seguir procesando este mensaje
 }
 
-function generateCode(prefix = "") {
-  return prefix + String(Math.floor(100 + Math.random() * 900)); 
+const COUNTER_DOC = db.collection("appData").doc("counter");
+
+// Devuelve el siguiente número de pedido (1, 2, 3...), llevando la cuenta en Firebase
+async function getNextOrderNumber() {
+  return db.runTransaction(async (t) => {
+    const snap = await t.get(COUNTER_DOC);
+    const next = snap.exists ? snap.data().nextOrderNumber || 1 : 1;
+    t.set(COUNTER_DOC, { nextOrderNumber: next + 1 });
+    return next;
+  });
+}
+
+// Asigna un número de pedido a la sesión (una sola vez), para que la cotización de envío
+// y la aprobación del comprobante del mismo cliente usen el mismo número.
+async function getOrderNumber(session) {
+  if (!session.data.orderNumber) {
+    session.data.orderNumber = await getNextOrderNumber();
+  }
+  return session.data.orderNumber;
 }
 
 // ============ SESIONES DE CONVERSACIÓN ============
@@ -212,11 +237,11 @@ async function processNextPendingMainItem(phone, session) {
 
     if (itemIncludesDrink(currentItem)) {
       const { menuItems } = await getBusinessConfig();
-      const drinks = menuItems.filter((i) => i.category === "drink" && i.available);
+      const drinks = getPersonalDrinkOptions(menuItems);
       session.data.comboDrinkOptions = drinks;
       session.step = "combo_drink_flavor";
       const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
-      await replyAndLog(phone, session, `Tu producto "${currentItem.name}" incluye bebida 🥤 ¿Cuál prefieres?\n\n${listado}`);
+      await replyAndLog(phone, session, `Tu producto "${currentItem.name}" incluye una cola personal 🥤 ¿Cuál sabor prefieres?\n\n${listado}`);
       return;
     } else {
       session.data.pendingMainItems.shift();
@@ -418,6 +443,21 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       return;
     }
     
+    if (session.data.afterComboDrinkStep === "sides_continue") {
+      const side = session.data.currentSide;
+      session.data.items.push({
+        ...drinks[idx],
+        price: 0,
+        qty: 1,
+        incluida: true,
+        name: `${drinks[idx].name} (para ${side.name})`,
+      });
+      delete session.data.afterComboDrinkStep;
+      await goToDrinkStepOrDelivery(phone, session);
+      await saveSession(phone, session);
+      return;
+    }
+
     const currentItem = session.data.pendingMainItems.shift(); 
     
     session.data.items.push({ 
@@ -467,6 +507,18 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const side = session.data.currentSide;
     session.data.items.push({ ...side, qty });
     session.data.foodTotal += side.price * qty;
+
+    if (itemIncludesDrink(side)) {
+      const { menuItems } = await getBusinessConfig();
+      const drinks = getPersonalDrinkOptions(menuItems);
+      session.data.comboDrinkOptions = drinks;
+      session.data.afterComboDrinkStep = "sides_continue"; // para saber a dónde volver luego del sabor
+      session.step = "combo_drink_flavor";
+      const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
+      await replyAndLog(phone, session, `Tu producto "${side.name}" incluye una cola personal 🥤 ¿Cuál sabor prefieres?\n\n${listado}`);
+      await saveSession(phone, session);
+      return;
+    }
 
     // Aquí evitamos volver a preguntar por los extras y saltamos a las bebidas directamente
     await goToDrinkStepOrDelivery(phone, session);
@@ -610,7 +662,8 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
 
 async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicacion) {
   const ownerPhone = botConfig.ownerPhone;
-  const code = generateCode();
+  const orderNumber = await getOrderNumber(session);
+  const code = String(orderNumber);
 
   session.data.address = direccionOUbicacion;
   session.step = "awaiting_delivery_price";
@@ -634,7 +687,8 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
 
 async function requestPaymentApproval(phone, session, botConfig, mediaId) {
   const ownerPhone = botConfig.ownerPhone;
-  const code = generateCode("P");
+  const orderNumber = await getOrderNumber(session);
+  const code = "P" + orderNumber;
   const total = session.data.foodTotal + (session.data.deliveryFee || 0);
 
   session.step = "awaiting_approval";
@@ -735,8 +789,7 @@ async function finalizeOrder(phone, session) {
     .map((i) => `${i.qty || 1}x ${i.name}${i.incluida ? " (incluida)" : ""}${i.volume ? ` (${i.volume})` : ""} ($${i.price.toFixed(2)} c/u)`)
     .join(", ");
 
-  const snapshot = await ORDERS_COL.get();
-  const orderNumber = snapshot.size + 1;
+  const orderNumber = await getOrderNumber(session); // el mismo número usado en la cotización/aprobación con el dueño
   const generatedCode = `#${orderNumber}`;
   
   const numericalFoodTotal = parseFloat(foodTotal) || 0;
