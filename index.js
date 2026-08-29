@@ -18,6 +18,7 @@ const CONFIG_DOC = db.collection("appData").doc("config");
 const ORDERS_COL = db.collection("pedidos");
 const SESSIONS_COL = db.collection("bot_sessions");
 const QUOTES_COL = db.collection("cotizaciones_envio"); // pedidos esperando precio de envío del dueño
+const APPROVALS_COL = db.collection("aprobaciones_pago"); // comprobantes esperando aprobación del dueño
 
 // ============ WHATSAPP / META ============
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
@@ -36,6 +37,15 @@ async function sendWhatsAppDocument(to, link, filename) {
   await axios.post(
     `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
     { messaging_product: "whatsapp", to, type: "document", document: { link, filename } },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+}
+
+// Reenvía una imagen ya recibida (por su media id) a otro número, sin volver a subirla
+async function sendWhatsAppImageById(to, mediaId, caption) {
+  await axios.post(
+    `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
+    { messaging_product: "whatsapp", to, type: "image", image: { id: mediaId, caption } },
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
   );
 }
@@ -67,6 +77,7 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const isImage = message.type === "image";
     const isLocation = message.type === "location";
+    const mediaId = isImage ? message.image?.id : null;
     const text = message.text?.body?.trim() || "";
     const locationLink = isLocation
       ? `https://www.google.com/maps?q=${message.location.latitude},${message.location.longitude}`
@@ -80,7 +91,7 @@ app.post("/webhook", async (req, res) => {
     if (ownerPhone && normalizePhone(from) === ownerPhone) {
       await handleOwnerReply(text);
     } else {
-      await handleIncomingMessage(from, text, isImage, isLocation, locationLink);
+      await handleIncomingMessage(from, text, isImage, isLocation, locationLink, mediaId);
     }
   } catch (err) {
     console.error("⚠️ Error procesando el webhook:", err.response?.data || err.message);
@@ -135,6 +146,15 @@ function randomSuggestions(menuItems, excludeId, count = 2) {
   return shuffled.slice(0, count);
 }
 
+// El producto trae una bebida incluida si la palabra "cola" aparece en su nombre o descripción
+function itemIncludesDrink(item) {
+  return /cola/i.test(`${item.name} ${item.desc || ""}`);
+}
+
+function generateCode(prefix = "") {
+  return prefix + String(Math.floor(100 + Math.random() * 900)); // 3 dígitos
+}
+
 // ============ SESIONES DE CONVERSACIÓN ============
 
 async function getSession(phone) {
@@ -157,7 +177,7 @@ function logClient(session, text) {
 
 // ============ CONVERSACIÓN CON EL CLIENTE ============
 
-async function handleIncomingMessage(phone, text, isImage, isLocation, locationLink) {
+async function handleIncomingMessage(phone, text, isImage, isLocation, locationLink, mediaId) {
   const { menuItems, botConfig, bankHolders } = await getBusinessConfig();
   let session = await getSession(phone);
   const entrada = isImage ? "(imagen)" : isLocation ? "(ubicación compartida)" : text;
@@ -196,11 +216,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
     const opciones = session.data.opciones || [];
 
     if (!isNaN(idx) && opciones[idx]) {
-      session.data.items = [opciones[idx]];
-      session.data.foodTotal = opciones[idx].price;
-      session.step = "delivery_type";
-      if (botConfig.upsellMsg) await replyAndLog(phone, session, botConfig.upsellMsg);
-      await replyAndLog(phone, session, "¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
+      await selectMainItem(phone, session, opciones[idx], botConfig);
       await saveSession(phone, session);
       return;
     }
@@ -225,17 +241,56 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
     if (match && match.available) {
       const realIdx = opciones.findIndex((o) => o.id === match.id);
       if (realIdx >= 0) {
-        session.data.items = [opciones[realIdx]];
-        session.data.foodTotal = opciones[realIdx].price;
-        session.step = "delivery_type";
-        if (botConfig.upsellMsg) await replyAndLog(phone, session, botConfig.upsellMsg);
-        await replyAndLog(phone, session, "¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
+        await selectMainItem(phone, session, opciones[realIdx], botConfig);
         await saveSession(phone, session);
         return;
       }
     }
 
     await replyAndLog(phone, session, "No entendí esa opción 🙁 Responde con el número del producto de la lista.");
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: cantidad del producto principal ---
+  if (session.step === "quantity") {
+    const qty = parseInt(text, 10);
+    if (isNaN(qty) || qty < 1 || qty > 20) {
+      await replyAndLog(phone, session, "Escribe un número válido de unidades (ej. 1, 2, 3...).");
+      await saveSession(phone, session);
+      return;
+    }
+    const item = session.data.items[0];
+    item.qty = qty;
+    session.data.foodTotal = item.price * qty;
+
+    if (itemIncludesDrink(item)) {
+      const drinks = menuItems.filter((i) => i.category === "drink" && i.available);
+      session.data.comboDrinkOptions = drinks;
+      session.step = "combo_drink_flavor";
+      const listado = drinks.map((d, i) => `${i + 1}. ${d.name}`).join("\n");
+      await replyAndLog(phone, session, `Tu pedido incluye una bebida 🥤 ¿Cuál prefieres?\n\n${listado}`);
+      await saveSession(phone, session);
+      return;
+    }
+
+    await continueAfterMainItem(phone, session, botConfig);
+    await saveSession(phone, session);
+    return;
+  }
+
+  // --- Paso: sabor de la bebida incluida ---
+  if (session.step === "combo_drink_flavor") {
+    const idx = parseInt(text, 10) - 1;
+    const drinks = session.data.comboDrinkOptions || [];
+    if (isNaN(idx) || !drinks[idx]) {
+      await replyAndLog(phone, session, "Responde con el número de la bebida de la lista.");
+      await saveSession(phone, session);
+      return;
+    }
+    session.data.items.push({ ...drinks[idx], price: 0, qty: 1, incluida: true });
+    session.data.includesDrink = true;
+    await continueAfterMainItem(phone, session, botConfig);
     await saveSession(phone, session);
     return;
   }
@@ -287,11 +342,10 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
         await saveSession(phone, session);
         return;
       }
-      session.data.items.push(sides[idx]);
+      session.data.items.push({ ...sides[idx], qty: 1 });
       session.data.foodTotal += sides[idx].price;
     }
-    session.step = "drink_yn";
-    await replyAndLog(phone, session, "¿Deseas agregar una bebida?\n1. Sí\n2. No");
+    await goToDrinkStepOrPayment(phone, session, bankHolders);
     await saveSession(phone, session);
     return;
   }
@@ -345,7 +399,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
       await saveSession(phone, session);
       return;
     }
-    session.data.items.push(drinks[idx]);
+    session.data.items.push({ ...drinks[idx], qty: 1 });
     session.data.foodTotal += drinks[idx].price;
     session.step = "payment";
     await sendPaymentInfo(phone, session, bankHolders);
@@ -360,9 +414,38 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, locationL
       await saveSession(phone, session);
       return;
     }
-    await finalizeOrder(phone, session);
-    await clearSession(phone);
+    await requestPaymentApproval(phone, session, botConfig, mediaId);
+    await saveSession(phone, session);
     return;
+  }
+
+  // --- Paso: esperando que el dueño apruebe el comprobante ---
+  if (session.step === "awaiting_approval") {
+    await replyAndLog(phone, session, "Estamos verificando tu comprobante, un momento por favor 🙏");
+    await saveSession(phone, session);
+    return;
+  }
+}
+
+async function selectMainItem(phone, session, item, botConfig) {
+  session.data.items = [item];
+  session.step = "quantity";
+  await replyAndLog(phone, session, `¿Cuántas unidades de "${item.name}" deseas?`);
+}
+
+async function continueAfterMainItem(phone, session, botConfig) {
+  session.step = "delivery_type";
+  if (botConfig.upsellMsg) await replyAndLog(phone, session, botConfig.upsellMsg);
+  await replyAndLog(phone, session, "¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
+}
+
+async function goToDrinkStepOrPayment(phone, session, bankHolders) {
+  if (session.data.includesDrink) {
+    session.step = "payment";
+    await sendPaymentInfo(phone, session, bankHolders);
+  } else {
+    session.step = "drink_yn";
+    await replyAndLog(phone, session, "¿Deseas agregar una bebida?\n1. Sí\n2. No");
   }
 }
 
@@ -370,8 +453,7 @@ async function sendSidesMenu(phone, session, menuItems) {
   const sides = menuItems.filter((i) => i.category === "other" && i.available);
   session.data.sidesOptions = sides;
   if (sides.length === 0) {
-    session.step = "drink_yn";
-    await replyAndLog(phone, session, "¿Deseas agregar una bebida?\n1. Sí\n2. No");
+    await goToDrinkStepOrPayment(phone, session, null);
     return;
   }
   const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
@@ -392,10 +474,9 @@ async function sendPaymentInfo(phone, session, bankHolders) {
 // --- Pide la cotización del envío al dueño, con un código de pedido para identificarlo ---
 async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicacion) {
   const ownerPhone = botConfig.ownerPhone;
-  const code = String(Math.floor(100 + Math.random() * 900)); // código de 3 dígitos
+  const code = generateCode();
 
   session.data.address = direccionOUbicacion;
-  session.data.quoteCode = code;
   session.step = "awaiting_delivery_price";
 
   await QUOTES_COL.doc(code).set({
@@ -417,26 +498,59 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
   }
 }
 
-// --- Procesa la respuesta del dueño con el precio del envío ---
+// --- Reenvía el comprobante al dueño y espera su aprobación ---
+async function requestPaymentApproval(phone, session, botConfig, mediaId) {
+  const ownerPhone = botConfig.ownerPhone;
+  const code = generateCode("P");
+  const total = session.data.foodTotal + (session.data.deliveryFee || 0);
+
+  session.step = "awaiting_approval";
+
+  await APPROVALS_COL.doc(code).set({ phone, status: "pending", createdAt: Date.now() });
+
+  await replyAndLog(phone, session, "📸 ¡Comprobante recibido! Lo estamos verificando, en un momento confirmamos tu pedido ✅");
+
+  if (ownerPhone && mediaId) {
+    await sendWhatsAppImageById(
+      ownerPhone,
+      mediaId,
+      `🧾 Comprobante de pago\nPedido #${code}\nCliente: ${phone}\nTotal: $${total.toFixed(2)}\n\nResponde: #${code} ok (confirmar) o #${code} no (rechazar)`
+    );
+  } else {
+    console.error("⚠️ No se pudo reenviar el comprobante al dueño (falta ownerPhone o mediaId).");
+  }
+}
+
+// --- Procesa la respuesta del dueño: cotización de envío O aprobación de comprobante ---
 async function handleOwnerReply(text) {
   const { botConfig } = await getBusinessConfig();
   const ownerPhone = botConfig.ownerPhone;
 
-  const match = text.trim().match(/^#?(\d{1,4})\s+(.+)$/);
+  const match = text.trim().match(/^#?([A-Za-z]?\d{1,4})\s+(.+)$/);
   if (!match) {
     if (ownerPhone) {
-      await sendWhatsAppText(ownerPhone, "Formato no reconocido. Escribe: #<código de pedido> <precio> (ej: #087 3 0)");
+      await sendWhatsAppText(
+        ownerPhone,
+        "Formato no reconocido.\nPara envío: #<código> <precio> (ej: #087 3 0)\nPara comprobante: #<código> ok  ó  #<código> no"
+      );
     }
     return;
   }
-  const code = match[1];
-  const price = parsePrice(match[2]);
+  const code = match[1].toUpperCase();
+  const rest = match[2].trim();
 
+  if (code.startsWith("P")) {
+    await resolvePaymentApproval(code, rest, ownerPhone);
+  } else {
+    await resolveDeliveryQuote(code, rest, ownerPhone);
+  }
+}
+
+async function resolveDeliveryQuote(code, rest, ownerPhone) {
+  const price = parsePrice(rest);
   const quoteSnap = await QUOTES_COL.doc(code).get();
   if (!quoteSnap.exists || quoteSnap.data().status !== "pending" || price === null) {
-    if (ownerPhone) {
-      await sendWhatsAppText(ownerPhone, `No encontré un pedido pendiente con el código #${code}, o el precio no es válido.`);
-    }
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, `No encontré un pedido pendiente con el código #${code}, o el precio no es válido.`);
     return;
   }
   const { phone } = quoteSnap.data();
@@ -446,25 +560,49 @@ async function handleOwnerReply(text) {
   if (!session) return;
 
   session.data.deliveryFee = price;
-  session.step = "sides";
   await replyAndLog(phone, session, `El envío tiene un valor de $${price.toFixed(2)}, se paga en *efectivo* directo al motorizado 🛵`);
 
   const { menuItems } = await getBusinessConfig();
   await sendSidesMenu(phone, session, menuItems);
   await saveSession(phone, session);
 
-  if (ownerPhone) {
-    await sendWhatsAppText(ownerPhone, `✅ Envié $${price.toFixed(2)} al cliente del pedido #${code}.`);
+  if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Envié $${price.toFixed(2)} al cliente del pedido #${code}.`);
+}
+
+async function resolvePaymentApproval(code, rest, ownerPhone) {
+  const approvalSnap = await APPROVALS_COL.doc(code).get();
+  if (!approvalSnap.exists || approvalSnap.data().status !== "pending") {
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, `No encontré un comprobante pendiente con el código #${code}.`);
+    return;
+  }
+  const { phone } = approvalSnap.data();
+  const session = await getSession(phone);
+  if (!session) return;
+
+  if (/^(ok|si|s[ií]|aprobado|confirmar)$/i.test(rest)) {
+    await APPROVALS_COL.doc(code).update({ status: "approved" });
+    await finalizeOrder(phone, session);
+    await clearSession(phone);
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Pedido #${code} confirmado.`);
+  } else if (/^(no|rechazar|rechazado)$/i.test(rest)) {
+    await APPROVALS_COL.doc(code).update({ status: "rejected" });
+    session.step = "payment";
+    await replyAndLog(phone, session, "No pudimos verificar tu comprobante 🙁 Por favor envía una foto más clara o vuelve a intentar la transferencia.");
+    await saveSession(phone, session);
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, `❌ Pedido #${code} rechazado, se le pidió reenviar el comprobante.`);
+  } else if (ownerPhone) {
+    await sendWhatsAppText(ownerPhone, `No entendí. Responde: #${code} ok  ó  #${code} no`);
   }
 }
 
 async function finalizeOrder(phone, session) {
   const { items, foodTotal, deliveryFee, address, deliveryType } = session.data;
-  session.chatHistory.push({ sender: "client", text: "[Imagen adjunta: Comprobante de Transferencia]" });
-  const confirmMsg = "✅ ¡Comprobante recibido! Tu pedido ya fue enviado a cocina. En breve nos comunicamos si es necesario. ¡Gracias por tu compra! 🍔";
+  const confirmMsg = "✅ ¡Pago confirmado! Tu pedido ya fue enviado a cocina. En breve nos comunicamos si es necesario. ¡Gracias por tu compra! 🍔";
   await replyAndLog(phone, session, confirmMsg);
 
-  const itemsSummary = items.map((i) => `1x ${i.name}${i.volume ? ` (${i.volume})` : ""} ($${i.price.toFixed(2)})`).join(", ");
+  const itemsSummary = items
+    .map((i) => `${i.qty || 1}x ${i.name}${i.incluida ? " (incluida)" : ""}${i.volume ? ` (${i.volume})` : ""} ($${i.price.toFixed(2)} c/u)`)
+    .join(", ");
 
   await ORDERS_COL.add({
     code: `WA-${Date.now()}`,
