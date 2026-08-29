@@ -139,9 +139,9 @@ function parsePrice(raw) {
   return isNaN(val) ? null : val;
 }
 
-function randomSuggestions(menuItems, excludeId, count = 2) {
+function randomSuggestions(menuItems, excludeId, count = 2, categorias = ["burger", "combo"]) {
   const disponibles = menuItems.filter(
-    (i) => (i.category === "burger" || i.category === "combo") && i.available && i.id !== excludeId
+    (i) => categorias.includes(i.category) && i.available && i.id !== excludeId
   );
   const shuffled = disponibles.sort(() => 0.5 - Math.random());
   return shuffled.slice(0, count);
@@ -149,6 +149,24 @@ function randomSuggestions(menuItems, excludeId, count = 2) {
 
 function itemIncludesDrink(item) {
   return /cola/i.test(`${item.name} ${item.desc || ""}`);
+}
+
+// Busca en TODO el menú (disponible o no) algo que coincida con el texto del cliente, dentro de las categorías dadas.
+// Si encuentra algo en pausa, devuelve el mensaje de "agotado" + sugerencias al azar de lo que sí está disponible.
+async function tryMatchUnavailable(phone, session, botConfig, menuItems, text, categorias) {
+  const match = menuItems.find((i) => categorias.includes(i.category) && normalizeText(i.name).includes(normalizeText(text)));
+  if (!match || match.available) return false; // no hubo coincidencia, o sí está disponible: seguir con el flujo normal
+
+  const sugerencias = randomSuggestions(menuItems, match.id, 2, categorias);
+  const listadoSug = sugerencias.map((s) => `- ${s.name}${s.price ? ` ($${s.price.toFixed(2)})` : ""}`).join("\n");
+  await replyAndLog(
+    phone,
+    session,
+    `${botConfig.soldOutMsg || `Lo sentimos, "${match.name}" no está disponible por ahora.`}\n\n${
+      sugerencias.length ? `Te sugerimos:\n${listadoSug}\n\n` : ""
+    }Responde con el número de alguna opción de la lista que te mostramos.`
+  );
+  return true; // ya se respondió, no seguir procesando este mensaje
 }
 
 function generateCode(prefix = "") {
@@ -424,6 +442,10 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const sides = session.data.sidesOptions || [];
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || !sides[idx]) {
+      if (await tryMatchUnavailable(phone, session, botConfig, menuItems, text, ["other"])) {
+        await saveSession(phone, session);
+        return;
+      }
       await replyAndLog(phone, session, "Responde con el número de la opción, o 0 si no deseas ninguna.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
@@ -475,6 +497,14 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const idx = parseInt(text, 10) - 1;
     const capacidades = session.data.drinkCapacities || [];
     if (isNaN(idx) || !capacidades[idx]) {
+      const todasLasCapacidades = [...new Set(menuItems.filter((i) => i.category === "drink").map((d) => d.volume || "Personal"))];
+      const pidioCapacidadSinStock = todasLasCapacidades.some((c) => normalizeText(c).includes(normalizeText(text)) && !capacidades.includes(c));
+      if (pidioCapacidadSinStock) {
+        const listado = capacidades.map((c, i) => `${i + 1}. ${c}`).join("\n");
+        await replyAndLog(phone, session, `${botConfig.soldOutMsg || "Lo sentimos, esa presentación no está disponible por ahora."}\n\nPresentaciones disponibles:\n${listado}`);
+        await saveSession(phone, session);
+        return;
+      }
       await replyAndLog(phone, session, "Responde con el número de la presentación de la lista.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
@@ -495,6 +525,10 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const idx = parseInt(text, 10) - 1;
     const drinks = session.data.drinkOptions || [];
     if (isNaN(idx) || !drinks[idx]) {
+      if (await tryMatchUnavailable(phone, session, botConfig, menuItems, text, ["drink"])) {
+        await saveSession(phone, session);
+        return;
+      }
       await replyAndLog(phone, session, "Responde con el número de la bebida de la lista.\n*(O escribe 'cancelar' para empezar de nuevo)*");
       await saveSession(phone, session);
       return;
