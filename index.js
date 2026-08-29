@@ -344,9 +344,20 @@ async function sendPaymentInfo(phone, session, bankHolders) {
   const cashAmount = (orderMethod === "efectivo" ? foodTotal : 0) + (deliveryMethod === "efectivo" ? deliveryFee : 0);
   const transferAmount = (orderMethod === "transferencia" ? foodTotal : 0) + (deliveryMethod === "transferencia" ? deliveryFee : 0);
 
+  // Helper para generar el texto dinámico de "(pedido)", "(envío)", o "(pedido y envío)"
+  function getLabel(method) {
+    let parts = [];
+    if (orderMethod === method) parts.push("pedido");
+    if (deliveryMethod === method) parts.push("envío");
+    return parts.length > 0 ? `(${parts.join(" y ")})` : "";
+  }
+
+  const cashLabel = getLabel("efectivo");
+  const transferLabel = getLabel("transferencia");
+
   let msg = `El total de tu pedido es $${total.toFixed(2)}.\n\n`;
-  if (cashAmount > 0) msg += `💵 Pago en efectivo (pedido o envío): $${cashAmount.toFixed(2)}\n`;
-  if (transferAmount > 0) msg += `💳 Pago por transferencia (pedido o envío): $${transferAmount.toFixed(2)}\n`;
+  if (cashAmount > 0) msg += `💵 Pago en efectivo ${cashLabel}: $${cashAmount.toFixed(2)}\n`;
+  if (transferAmount > 0) msg += `💳 Pago por transferencia ${transferLabel}: $${transferAmount.toFixed(2)}\n`;
 
   if (transferAmount > 0) {
     const cuentas = formatBankAccountsForChat(bankHolders);
@@ -855,7 +866,7 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
 // Arma el texto con el desglose del pedido (ítems, sabores incluidos, subtotal, envío y total)
 // para que el dueño pueda verificarlo contra el comprobante que recibirá justo después.
 function buildOrderBreakdownText(phone, session, code) {
-  const { items = [], foodTotal = 0, deliveryFee = 0, address, deliveryType } = session.data;
+  const { items = [], foodTotal = 0, deliveryFee = 0, address, deliveryType, orderPaymentMethod, deliveryPaymentMethod } = session.data;
   const total = foodTotal + (deliveryFee || 0);
 
   // Igual criterio que en finalizeOrder: las bebidas incluidas (name = "X (para Y)")
@@ -871,9 +882,24 @@ function buildOrderBreakdownText(phone, session, code) {
     return `• ${qty}x ${item.name}${sabor} — $${lineTotal.toFixed(2)}`;
   });
 
-  let msg = `📋 Desglose del Pedido #${code}\nCliente: ${phone}\n\n${lineas.join("\n")}\n\nSubtotal: $${foodTotal.toFixed(2)}`;
-  if (deliveryFee > 0) msg += `\nEnvío: $${deliveryFee.toFixed(2)}`;
-  msg += `\nTotal: $${total.toFixed(2)}`;
+  const oMethod = orderPaymentMethod || 'efectivo';
+  const dMethod = deliveryType === "domicilio" ? (deliveryPaymentMethod || 'efectivo') : null;
+
+  let msg = `📋 Desglose del Pedido #${code}\nCliente: ${phone}\n\n${lineas.join("\n")}\n\nSubtotal: $${foodTotal.toFixed(2)} (${oMethod})`;
+  if (deliveryFee > 0) msg += `\nEnvío: $${deliveryFee.toFixed(2)} (${dMethod})`;
+  msg += `\nTotal General: $${total.toFixed(2)}`;
+  
+  const cashAmount = (oMethod === "efectivo" ? foodTotal : 0) + (dMethod === "efectivo" ? deliveryFee : 0);
+  const transferAmount = (oMethod === "transferencia" ? foodTotal : 0) + (dMethod === "transferencia" ? deliveryFee : 0);
+
+  msg += `\n`;
+  if (transferAmount > 0) {
+      msg += `\n💳 Comprobante debe ser por: $${transferAmount.toFixed(2)}`;
+  }
+  if (cashAmount > 0) {
+      msg += `\n💵 A cobrar en efectivo: $${cashAmount.toFixed(2)}`;
+  }
+
   msg += `\n\n${deliveryType === "domicilio" ? `📍 Domicilio: ${address || "-"}` : "🏬 Retira en tienda"}`;
 
   return msg;
