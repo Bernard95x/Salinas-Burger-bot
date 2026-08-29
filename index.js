@@ -261,7 +261,8 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   }
 
   let session = await getSession(phone);
-  
+  const esSesionNueva = !session;
+
   let entrada = text;
   if (isImage) entrada = "(imagen)";
   if (isLocation) entrada = "(ubicación compartida)";
@@ -288,13 +289,13 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       }
     }
 
-    if (!session.chatHistory.length) {
+    if (esSesionNueva) {
       await replyAndLog(phone, session, botConfig.welcomeMsg || "¡Hola! Bienvenido a Salinas Burger 🍔");
-    }
 
-    if (botConfig.menuPdfUrl) {
-      await sendWhatsAppDocument(phone, botConfig.menuPdfUrl, botConfig.menuPdfName || "Menu.pdf");
-      session.chatHistory.push({ sender: "ai", text: `📄 [PDF enviado: ${botConfig.menuPdfName || "Menu.pdf"}]` });
+      if (botConfig.menuPdfUrl) {
+        await sendWhatsAppDocument(phone, botConfig.menuPdfUrl, botConfig.menuPdfName || "Menu.pdf");
+        session.chatHistory.push({ sender: "ai", text: `📄 [PDF enviado: ${botConfig.menuPdfName || "Menu.pdf"}]` });
+      }
     }
 
     const disponibles = menuItems.filter((i) => (i.category === "burger" || i.category === "combo") && i.available);
