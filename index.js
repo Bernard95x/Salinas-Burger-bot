@@ -786,8 +786,8 @@ async function finalizeOrder(phone, session) {
   await replyAndLog(phone, session, confirmMsg);
 
   const itemsSummary = items
-    .map((i) => `${i.qty || 1}x ${i.name}${i.incluida ? " (incluida)" : ""}${i.volume ? ` (${i.volume})` : ""} ($${i.price.toFixed(2)} c/u)`)
-    .join(", ");
+    .map((i) => `• ${i.qty || 1}x ${i.name}${i.incluida ? " (incluida)" : ""}${i.volume ? ` (${i.volume})` : ""} — $${i.price.toFixed(2)} c/u`)
+    .join("\n");
 
   const orderNumber = await getOrderNumber(session); // el mismo número usado en la cotización/aprobación con el dueño
   const generatedCode = `#${orderNumber}`;
