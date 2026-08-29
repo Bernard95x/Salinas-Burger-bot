@@ -221,7 +221,7 @@ async function sendSidesMenu(phone, session, menuItems, hasBurger) {
   
   const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
   
-  let msg = hasBurger 
+  const msg = hasBurger 
     ? `Notamos que pediste hamburguesas 🍔 ¿Deseas acompañar tu pedido con unas papas o extras?\n\nResponde con el número de la opción, o *0* si no deseas nada más.\n\n${listado}`
     : `¿Deseas acompañar tu pedido con algo de esto?\n\nResponde con el número de la opción, o *0* si no deseas nada más.\n\n${listado}`;
 
@@ -235,7 +235,6 @@ async function goToDrinkStepOrDelivery(phone, session) {
 
 async function askDeliveryType(phone, session, botConfig) {
   session.step = "delivery_type";
-  // Se omitió el mensaje previo de upsell para pasar directo a preguntar el método de entrega
   await replyAndLog(phone, session, "¡Excelente! Ya tenemos todo lo que necesitas.\n\n¿Tu pedido es para *domicilio* o para *retirar en tienda*?\n1. Domicilio\n2. Retirar en tienda");
 }
 
@@ -310,7 +309,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
       .map((b, i) => `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`)
       .join("\n");
       
-    // Instrucciones y tip movidos ANTES del menú
     await replyAndLog(phone, session, `Este es nuestro menú principal.\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n*(💡 Tip: Si te equivocas en tu pedido, puedes escribir "cancelar" en cualquier momento)*\n\n${listado}`);
     await saveSession(phone, session);
     return;
@@ -447,9 +445,8 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     session.data.items.push({ ...side, qty });
     session.data.foodTotal += side.price * qty;
 
-    const hasBurger = session.data.items.some(i => i.category === 'burger');
-    session.step = "sides";
-    await sendSidesMenu(phone, session, menuItems, hasBurger);
+    // Aquí evitamos volver a preguntar por los extras y saltamos a las bebidas directamente
+    await goToDrinkStepOrDelivery(phone, session);
     await saveSession(phone, session);
     return;
   }
@@ -519,7 +516,6 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     session.data.items.push({ ...drink, qty });
     session.data.foodTotal += drink.price * qty;
 
-    // Ya no vuelve a preguntar por otra bebida, pasa directo al tipo de entrega
     await askDeliveryType(phone, session, botConfig);
     await saveSession(phone, session);
     return;
