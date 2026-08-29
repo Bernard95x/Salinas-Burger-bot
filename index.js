@@ -89,8 +89,12 @@ app.post("/webhook", async (req, res) => {
 
     const { botConfig } = await getBusinessConfig();
     const ownerPhone = normalizePhone(botConfig.ownerPhone);
+    const fromPhone = normalizePhone(from);
 
-    if (ownerPhone && normalizePhone(from) === ownerPhone) {
+    // Validar usando los últimos 9 dígitos para evitar problemas con el código de país
+    const isOwner = ownerPhone && fromPhone.endsWith(ownerPhone.slice(-9));
+
+    if (isOwner) {
       await handleOwnerReply(text);
     } else {
       await handleIncomingMessage(from, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId);
@@ -112,7 +116,10 @@ async function getBusinessConfig() {
   const configData = configSnap.exists ? configSnap.data() : {};
   return {
     menuItems: menuData.menuItems || [],
-    botConfig: { ...(configData.botConfig || {}), ownerPhone: configData.audioSettings?.ownerPhone },
+    botConfig: { 
+      ...(configData.botConfig || {}), 
+      ownerPhone: configData.botConfig?.ownerPhone || configData.audioSettings?.ownerPhone 
+    },
     bankHolders: configData.bankHolders || [],
   };
 }
@@ -999,7 +1006,6 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
   await ORDERS_COL.add({
     code: generatedCode,
     client: phone,
-    phone,
     sector: deliveryType === "domicilio" ? address : "Retiro en tienda",
     items: itemsList,
     foodTotal: numericalFoodTotal,
