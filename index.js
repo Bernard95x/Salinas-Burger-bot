@@ -53,6 +53,17 @@ async function sendWhatsAppImageById(to, mediaId, caption) {
 const app = express();
 app.use(express.json());
 
+// Permite que la app (el APK) le pida al bot que envíe mensajes por ella
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type, x-api-secret");
+  res.header("Access-Control-Allow-Methods", "POST, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
+const APP_API_SECRET = process.env.APP_API_SECRET || "";
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -1131,6 +1142,35 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
 
   console.log(`✅ Pedido ${generatedCode} guardado para ${phone}`);
 }
+
+// La app llama aquí cuando el dueño marca "Comida Terminada (Avisar Motorizado)"
+app.post("/api/notify-ready", async (req, res) => {
+  try {
+    if (APP_API_SECRET && req.headers["x-api-secret"] !== APP_API_SECRET) {
+      return res.sendStatus(401);
+    }
+    const { code, address, deliveryFee } = req.body;
+    const { botConfig } = await getBusinessConfig();
+    const ownerPhone = botConfig.ownerPhone;
+    if (!ownerPhone) {
+      return res.status(400).json({ error: "No hay un número de dueño configurado en la app." });
+    }
+
+    const fee = parseFloat(deliveryFee) || 0;
+    const mensaje =
+      `🛵 *¡Pedido listo para despacho!*\n\n` +
+      `Pedido ${code || ""}\n` +
+      `📍 Ubicación: ${address || "No especificada"}\n` +
+      `💵 Valor del envío: $${fee.toFixed(2)} (en efectivo)\n\n` +
+      `Por favor, acércate al local a retirar el pedido para su despacho. ¡Muchas gracias! 🙏`;
+
+    await sendWhatsAppText(ownerPhone, mensaje);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("⚠️ Error en /api/notify-ready:", err.response?.data || err.message);
+    res.status(500).json({ error: "No se pudo enviar el mensaje." });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor escuchando en http://localhost:${PORT}`));
