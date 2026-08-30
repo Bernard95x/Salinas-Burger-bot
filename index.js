@@ -915,11 +915,14 @@ function buildOrderBreakdownText(phone, session, code) {
   const principales = items.filter((i) => !i.incluida);
 
   const lineas = principales.map((item) => {
-    const incluidaDeEste = incluidas.find((inc) => inc.name.includes(`(para ${item.name})`));
+    const bebidaDeEste = incluidas.find((inc) => inc.category === "drink" && inc.name.includes(`(para ${item.name})`));
+    const salsaDeEste = incluidas.find((inc) => inc.category === "sauce" && inc.name.includes(`(para ${item.name})`));
     const qty = item.qty || 1;
     const lineTotal = item.price * qty;
-    const sabor = incluidaDeEste ? ` (sabor: ${incluidaDeEste.name.split(" (para ")[0]})` : "";
-    return `• ${qty}x ${item.name}${sabor} — $${lineTotal.toFixed(2)}`;
+    let extras = "";
+    if (bebidaDeEste) extras += ` (sabor bebida: ${bebidaDeEste.name.split(" (para ")[0]})`;
+    if (salsaDeEste) extras += ` (sabor salsa: ${salsaDeEste.name.split(" (para ")[0]})`;
+    return `• ${qty}x ${item.name}${extras} — $${lineTotal.toFixed(2)}`;
   });
 
   const oMethod = orderPaymentMethod || 'efectivo';
@@ -1089,14 +1092,16 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
   const incluidas = items.filter((i) => i.incluida);
   const principales = items.filter((i) => !i.incluida);
   const itemsList = principales.map((item) => {
-    const incluidaDeEste = incluidas.find((inc) => inc.name.includes(`(para ${item.name})`));
+    const bebidaDeEste = incluidas.find((inc) => inc.category === "drink" && inc.name.includes(`(para ${item.name})`));
+    const salsaDeEste = incluidas.find((inc) => inc.category === "sauce" && inc.name.includes(`(para ${item.name})`));
     return {
       qty: item.qty || 1,
       name: item.name,
       category: item.category,
       unitPrice: item.price,
       total: item.price * (item.qty || 1),
-      flavor: incluidaDeEste ? incluidaDeEste.name.split(" (para ")[0] : null,
+      drinkFlavor: bebidaDeEste ? bebidaDeEste.name.split(" (para ")[0] : null,
+      sauceFlavor: salsaDeEste ? salsaDeEste.name.split(" (para ")[0] : null,
     };
   });
 
