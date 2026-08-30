@@ -33,6 +33,15 @@ async function sendWhatsAppText(to, body) {
   );
 }
 
+// Envía al dueño un mensaje de ejemplo listo para editar, con el comando #F para avisarle algo al cliente
+async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
+  if (!ownerPhone) return;
+  await sendWhatsAppText(
+    ownerPhone,
+    `💬 *¿Quieres avisarle algo al cliente?*\nEdita y envía este mensaje:\n\n#F${orderNumber} ${sugerencia}`
+  );
+}
+
 async function sendWhatsAppDocument(to, link, filename) {
   await axios.post(
     `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
@@ -1014,6 +1023,8 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
         `🧾 Comprobante de pago\nPedido #${code}\nCliente: ${phone}\nTotal: $${total.toFixed(2)}\n\nResponde: #${code} ok (confirmar) o #${code} no (rechazar)`
       );
     }
+
+    await sendComandoFEjemplo(ownerPhone, orderNumber, "tu pedido está en preparación, toma aproximadamente 20 minutos");
   }
 }
 
@@ -1185,6 +1196,8 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
   await ORDERS_COL.add({
     code: generatedCode,
     client: phone,
+    phone,
+    deliveryType: deliveryType || "retiro",
     sector: deliveryType === "domicilio" ? address : "Retiro en tienda",
     items: itemsList,
     foodTotal: numericalFoodTotal,
@@ -1209,7 +1222,7 @@ app.post("/api/notify-ready", async (req, res) => {
     if (APP_API_SECRET && req.headers["x-api-secret"] !== APP_API_SECRET) {
       return res.sendStatus(401);
     }
-    const { code, address, deliveryFee, clientPhone } = req.body;
+    const { tipo, code, address, deliveryFee, clientPhone, total } = req.body;
     const { botConfig } = await getBusinessConfig();
     const ownerPhone = botConfig.ownerPhone;
     if (!ownerPhone) {
@@ -1217,15 +1230,40 @@ app.post("/api/notify-ready", async (req, res) => {
     }
 
     const fee = parseFloat(deliveryFee) || 0;
-    const mensaje =
-      `🛵 *¡Pedido listo para despacho!*\n\n` +
-      `Pedido ${code || ""}\n` +
-      `📍 Ubicación: ${address || "No especificada"}\n` +
-      `📞 Cliente: ${clientPhone || "No especificado"}\n` +
-      `💵 Valor del envío: $${fee.toFixed(2)} (en efectivo)\n\n` +
-      `Por favor, acércate al local a retirar el pedido para su despacho. ¡Muchas gracias! 🙏`;
+    const totalNum = parseFloat(total) || 0;
+    const orderNumber = String(code || "").replace("#", "");
+    let mensaje = "";
+    let sugerenciaF = "";
+
+    if (tipo === "retiro") {
+      mensaje =
+        `🏬 *¡Pedido listo para retiro!*\n\n` +
+        `Pedido ${code || ""}\n` +
+        `📞 Cliente: ${clientPhone || "No especificado"}\n` +
+        `💵 Total a cobrar: $${totalNum.toFixed(2)}\n\n` +
+        `El cliente puede acercarse al local a retirar su pedido.`;
+      sugerenciaF = "tu pedido ya está listo, puedes acercarte a retirarlo cuando gustes";
+    } else if (tipo === "despachado") {
+      mensaje =
+        `🛵 *Motorizado retiró el pedido*\n\n` +
+        `Pedido ${code || ""}\n` +
+        `💵 Valor del envío: $${fee.toFixed(2)} (en efectivo)`;
+      sugerenciaF = "el motorizado ya va en camino con tu pedido";
+    } else {
+      // tipo === "motorizado" (por defecto): avisar para despacho a domicilio
+      mensaje =
+        `🛵 *¡Pedido listo para despacho!*\n\n` +
+        `Pedido ${code || ""}\n` +
+        `📍 Ubicación: ${address || "No especificada"}\n` +
+        `📞 Cliente: ${clientPhone || "No especificado"}\n` +
+        `💵 Valor del envío: $${fee.toFixed(2)} (en efectivo)\n\n` +
+        `Por favor, acércate al local a retirar el pedido para su despacho. ¡Muchas gracias! 🙏`;
+      sugerenciaF = "tu pedido ya está listo, en breve el motorizado se dirige a entregarlo";
+    }
 
     await sendWhatsAppText(ownerPhone, mensaje);
+    if (orderNumber) await sendComandoFEjemplo(ownerPhone, orderNumber, sugerenciaF);
+
     res.json({ success: true });
   } catch (err) {
     console.error("⚠️ Error en /api/notify-ready:", err.response?.data || err.message);
