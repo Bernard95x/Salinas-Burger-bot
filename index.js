@@ -808,6 +808,34 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   }
   // ================================
 
+  if (session.step === "post_order_followup") {
+    if (text === "1") {
+      session.step = "post_order_reply_text";
+      await replyAndLog(phone, session, "Escribe tu mensaje:");
+    } else if (text === "2") {
+      await replyAndLog(phone, session, "¡Perfecto! Gracias por tu compra 🍔 Que lo disfrutes.");
+      await clearSession(phone);
+      return;
+    } else {
+      await replyAndLog(phone, session, "Responde 1 para Responder o 2 para Finalizar la conversación.");
+    }
+    await saveSession(phone, session);
+    return;
+  }
+
+  if (session.step === "post_order_reply_text") {
+    const { botConfig } = await getBusinessConfig();
+    const orderNum = session.data.orderNumber;
+    if (botConfig.ownerPhone) {
+      await sendWhatsAppText(botConfig.ownerPhone, `💬 Respuesta del cliente (Pedido #${orderNum}):\n"${text}"`);
+    }
+    session.step = "post_order_followup";
+    await replyAndLog(phone, session, "Tu mensaje fue enviado al local ✅\n\n¿Deseas responder algo más o finalizar la conversación?\n1. Responder\n2. Finalizar conversación");
+    await saveSession(phone, session);
+    return;
+  }
+  // ================================
+
   if (session.step === "order_payment_method") {
     if (text === "1") {
       session.data.orderPaymentMethod = "efectivo";
@@ -999,7 +1027,7 @@ async function handleOwnerReply(text) {
     if (ownerPhone) {
       await sendWhatsAppText(
         ownerPhone,
-        "Formato no reconocido.\nPara envío: #<código> <precio>\nPara comprobante: #P<código> ok/no\nPara mensaje: #M<código> <respuesta>"
+        "Formato no reconocido.\nPara envío: #<código> <precio>\nPara comprobante: #P<código> ok/no\nPara mensaje: #M<código> <respuesta>\nPara avisar pedido listo: #F<código> <mensaje>"
       );
     }
     return;
@@ -1011,9 +1039,41 @@ async function handleOwnerReply(text) {
     await resolvePaymentApproval(code, rest, ownerPhone);
   } else if (code.startsWith("M")) {
     await resolveOwnerMessage(code, rest, ownerPhone);
+  } else if (code.startsWith("F")) {
+    await resolveFoodReadyMessage(code, rest, ownerPhone);
   } else {
     await resolveDeliveryQuote(code, rest, ownerPhone);
   }
+}
+
+// #F<pedido> <mensaje> — el dueño le avisa al cliente que su pedido está listo (o cualquier aviso post-pedido)
+async function resolveFoodReadyMessage(code, rest, ownerPhone) {
+  const orderNum = parseInt(code.substring(1), 10);
+  if (isNaN(orderNum)) {
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, "Código de pedido inválido. Usa: #F<número> <mensaje>");
+    return;
+  }
+
+  const snap = await ORDERS_COL.where("code", "==", `#${orderNum}`).limit(1).get();
+  if (snap.empty) {
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, `No encontré el pedido #${orderNum}.`);
+    return;
+  }
+  const orderData = snap.docs[0].data();
+  const phone = orderData.phone || orderData.client;
+  if (!phone) {
+    if (ownerPhone) await sendWhatsAppText(ownerPhone, `El pedido #${orderNum} no tiene un teléfono asociado.`);
+    return;
+  }
+
+  let session = (await getSession(phone)) || { data: {}, chatHistory: [] };
+  session.data.orderNumber = orderNum;
+  session.step = "post_order_followup";
+
+  await replyAndLog(phone, session, `${rest}\n\n¿Deseas responder algo o finalizar la conversación?\n1. Responder\n2. Finalizar conversación`);
+  await saveSession(phone, session);
+
+  if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Mensaje enviado al cliente del pedido #${orderNum}.`);
 }
 
 async function resolveOwnerMessage(code, rest, ownerPhone) {
@@ -1149,7 +1209,7 @@ app.post("/api/notify-ready", async (req, res) => {
     if (APP_API_SECRET && req.headers["x-api-secret"] !== APP_API_SECRET) {
       return res.sendStatus(401);
     }
-    const { code, address, deliveryFee } = req.body;
+    const { code, address, deliveryFee, clientPhone } = req.body;
     const { botConfig } = await getBusinessConfig();
     const ownerPhone = botConfig.ownerPhone;
     if (!ownerPhone) {
@@ -1161,6 +1221,7 @@ app.post("/api/notify-ready", async (req, res) => {
       `🛵 *¡Pedido listo para despacho!*\n\n` +
       `Pedido ${code || ""}\n` +
       `📍 Ubicación: ${address || "No especificada"}\n` +
+      `📞 Cliente: ${clientPhone || "No especificado"}\n` +
       `💵 Valor del envío: $${fee.toFixed(2)} (en efectivo)\n\n` +
       `Por favor, acércate al local a retirar el pedido para su despacho. ¡Muchas gracias! 🙏`;
 
