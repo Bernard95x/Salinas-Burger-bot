@@ -182,16 +182,6 @@ function itemIncludesFries(item) {
   return /papas|marranita/i.test(`${item.name} ${item.desc || ""}`);
 }
 
-// Arma una línea de menú para el cliente: "N. Nombre - $Precio" y, debajo, la
-// descripción/ingredientes entre paréntesis en itálica (para que se vea "más chica"/secundaria,
-// que es lo más parecido a un texto pequeño que soporta el formato de WhatsApp).
-function formatMenuLine(item, index) {
-  const linea = `${index + 1}. ${item.name}${item.category === "combo" ? " (Combo)" : ""} - $${item.price.toFixed(2)}`;
-  const desc = (item.desc || "").trim().replace(/\.$/, "");
-  const detalle = desc ? `\n   _(${desc})_` : "";
-  return linea + detalle;
-}
-
 function getSauceOptions(menuItems) {
   return menuItems.filter((i) => i.category === "sauce" && i.available);
 }
@@ -305,7 +295,7 @@ async function sendSidesMenu(phone, session, menuItems, hasBurger) {
     return;
   }
   
-  const listado = sides.map((s, i) => formatMenuLine(s, i)).join("\n");
+  const listado = sides.map((s, i) => `${i + 1}. ${s.name} - $${s.price.toFixed(2)}`).join("\n");
   
   const msg = hasBurger 
     ? `Notamos que pediste hamburguesas 🍔 ¿Deseas acompañar tu pedido con unas papas o extras?\n\nResponde con el número de la opción, o *0* si no deseas nada más.\n\n${listado}`
@@ -464,7 +454,15 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     }
     
     session.data.opciones = disponibles;
-    const listado = disponibles.map((b, i) => formatMenuLine(b, i)).join("\n");
+    const listado = disponibles
+      .map((b, i) => {
+        const linea = `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`;
+        // Se muestra siempre la descripción completa (ingredientes), así el cliente
+        // sabe exactamente qué incluye cada producto sin tener que preguntar.
+        const detalle = b.desc ? `\n   🧾 ${b.desc}` : "";
+        return linea + detalle;
+      })
+      .join("\n");
       
     // Nota inicial advertida al cliente
     await replyAndLog(phone, session, `Este es nuestro menú principal.\nResponde con el número que deseas (Si deseas varios, escríbelos como "1 y 3").\n*(💡 Tip: Si te equivocas, escribe "cancelar". Más adelante podrás dejarnos instrucciones especiales como 'sin pepinillos')*\n\n${listado}`);
@@ -729,7 +727,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     );
     session.data.drinkOptions = drinks;
     session.step = "drink_choice";
-    const listado = drinks.map((d, i) => formatMenuLine(d, i)).join("\n");
+    const listado = drinks.map((d, i) => `${i + 1}. ${d.name} - $${d.price.toFixed(2)}`).join("\n");
     await replyAndLog(phone, session, `Marcas disponibles en ${capacidad}:\n\n${listado}`);
     await saveSession(phone, session);
     return;
