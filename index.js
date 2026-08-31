@@ -1203,6 +1203,8 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
     foodTotal: numericalFoodTotal,
     deliveryFee: numericalDeliveryFee,
     total: numericalFoodTotal + numericalDeliveryFee, 
+    orderPaymentMethod: session.data.orderPaymentMethod || null,
+    deliveryPaymentMethod: session.data.deliveryPaymentMethod || null,
     notes: session.data.notes || [], // ACÁ SE INYECTAN LAS NOTAS AL DOCUMENTO FINAL DE FIREBASE
     status: "process",
     startTime: Date.now(),
