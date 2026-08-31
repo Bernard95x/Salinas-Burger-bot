@@ -230,20 +230,37 @@ async function getOrderNumber(session) {
 
 async function getSession(phone) {
   const snap = await SESSIONS_COL.doc(phone).get();
-  return snap.exists ? snap.data() : null;
+  if (!snap.exists) return null;
+  const session = snap.data();
+
+  // ⏱️ VALIDACIÓN DE INACTIVIDAD (90 minutos = 5400000 ms)
+  const TIEMPO_INACTIVIDAD = 90 * 60 * 1000;
+  if (session.lastInteraction && (Date.now() - session.lastInteraction > TIEMPO_INACTIVIDAD)) {
+    await clearSession(phone);
+    return null;
+  }
+
+  return session;
 }
+
 async function saveSession(phone, session) {
+  session.lastInteraction = Date.now(); // Actualiza la marca de tiempo en cada guardado
   await SESSIONS_COL.doc(phone).set(session);
 }
+
 async function clearSession(phone) {
   await SESSIONS_COL.doc(phone).delete();
 }
+
 async function replyAndLog(phone, session, text) {
   await sendWhatsAppText(phone, text);
   session.chatHistory.push({ sender: "ai", text });
+  session.lastInteraction = Date.now();
 }
+
 function logClient(session, text) {
   session.chatHistory.push({ sender: "client", text });
+  session.lastInteraction = Date.now();
 }
 
 // ============ FUNCIONES DE FLUJO AUXILIARES ============
@@ -417,7 +434,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
   if (isOrder) entrada = "(carrito de compras recibido)";
 
   if (!session || (isOrder && session.step === "menu")) {
-    session = session || { step: "menu", data: {}, chatHistory: [] };
+    session = session || { step: "menu", data: {}, chatHistory: [], lastInteraction: Date.now() };
     logClient(session, entrada);
 
     if (isOrder && orderData) {
