@@ -455,7 +455,13 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     
     session.data.opciones = disponibles;
     const listado = disponibles
-      .map((b, i) => `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`)
+      .map((b, i) => {
+        const linea = `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`;
+        // Los combos tienen nombre corto (Combo #N), así que agregamos el desglose real debajo
+        // para que el cliente sepa qué incluye, sin tener que preguntar.
+        const detalle = b.category === "combo" && b.desc ? `\n   🧾 ${b.desc}` : "";
+        return linea + detalle;
+      })
       .join("\n");
       
     // Nota inicial advertida al cliente
