@@ -457,9 +457,8 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
     const listado = disponibles
       .map((b, i) => {
         const linea = `${i + 1}. ${b.name}${b.category === "combo" ? " (Combo)" : ""} - $${b.price.toFixed(2)}`;
-        // Se muestra siempre la descripción completa (ingredientes), así el cliente
-        // sabe exactamente qué incluye cada producto sin tener que preguntar.
-        const detalle = b.desc ? `\n   🧾 ${b.desc}` : "";
+        // Se muestra la descripción solo si NO es combo[cite: 3]
+        const detalle = (b.category === "combo" || !b.desc) ? "" : `\n   🧾 ${b.desc}`;
         return linea + detalle;
       })
       .join("\n");
@@ -975,7 +974,7 @@ function buildOrderBreakdownText(phone, session, code) {
     const lineTotal = item.price * qty;
     let extras = "";
     if (bebidaDeEste) extras += ` (sabor bebida: ${bebidaDeEste.name.split(" (para ")[0]})`;
-    if (salsaDeEste) extras += ` (sabor salsa: ${salsaDeEste.name.split(" (para ")[0]})`;
+    if (salsaDeEste) extras += ` (salsa: ${salsaDeEste.name.split(" (para ")[0]})`;
     return `• ${qty}x ${item.name}${extras} — $${lineTotal.toFixed(2)}`;
   });
 
@@ -997,7 +996,6 @@ function buildOrderBreakdownText(phone, session, code) {
       msg += `\n💵 A cobrar en efectivo: $${cashAmount.toFixed(2)}`;
   }
 
-  // Agrega las notas al resumen para el dueño
   if (session.data.notes && session.data.notes.length > 0) {
       msg += `\n\n📝 *Notas del cliente:*\n- ${session.data.notes.join("\n- ")}`;
   }
@@ -1038,7 +1036,6 @@ async function handleOwnerReply(text) {
   const { botConfig } = await getBusinessConfig();
   const ownerPhone = botConfig.ownerPhone;
 
-  // Actualizado para permitir mensajes multilínea del dueño ([\s\S]+ en lugar de .+)
   const match = text.trim().match(/^#?([A-Za-z]?\d{1,4})\s+([\s\S]+)$/);
   if (!match) {
     if (ownerPhone) {
@@ -1063,7 +1060,6 @@ async function handleOwnerReply(text) {
   }
 }
 
-// #F<pedido> <mensaje> — el dueño le avisa al cliente que su pedido está listo (o cualquier aviso post-pedido)
 async function resolveFoodReadyMessage(code, rest, ownerPhone) {
   const orderNum = parseInt(code.substring(1), 10);
   if (isNaN(orderNum)) {
@@ -1211,7 +1207,7 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
     total: numericalFoodTotal + numericalDeliveryFee, 
     orderPaymentMethod: session.data.orderPaymentMethod || null,
     deliveryPaymentMethod: session.data.deliveryPaymentMethod || null,
-    notes: session.data.notes || [], // ACÁ SE INYECTAN LAS NOTAS AL DOCUMENTO FINAL DE FIREBASE
+    notes: session.data.notes || [],
     status: "process",
     startTime: Date.now(),
     dispatchTime: null,
@@ -1224,7 +1220,6 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
   console.log(`✅ Pedido ${generatedCode} guardado para ${phone}`);
 }
 
-// La app llama aquí cuando el dueño marca "Comida Terminada (Avisar Motorizado)"
 app.post("/api/notify-ready", async (req, res) => {
   try {
     if (APP_API_SECRET && req.headers["x-api-secret"] !== APP_API_SECRET) {
@@ -1258,7 +1253,6 @@ app.post("/api/notify-ready", async (req, res) => {
         `💵 Valor del envío: $${fee.toFixed(2)} (en efectivo)`;
       sugerenciaF = "el motorizado ya va en camino con tu pedido";
     } else {
-      // tipo === "motorizado" (por defecto): avisar para despacho a domicilio
       mensaje =
         `🛵 *¡Pedido listo para despacho!*\n\n` +
         `Pedido ${code || ""}\n` +
