@@ -36,9 +36,17 @@ async function sendWhatsAppText(to, body) {
 // Envía al dueño la sugerencia formal con las opciones 1 y 2
 async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
  if (!ownerPhone) return;
+ 
+ let ownerSession = await getSession("owner_" + ownerPhone) || { data: {} };
+ ownerSession.data.pendingSuggestion = {
+   orderNumber: orderNumber,
+   text: sugerencia
+ };
+ await saveSession("owner_" + ownerPhone, ownerSession);
+
  await sendWhatsAppText(
    ownerPhone,
-   `💬 *Notificación para el cliente*\nSugerencia automática para el Pedido #${orderNumber}:\n\n"${sugerencia}"\n\nElija una opción:\n1️⃣ Enviar esta sugerencia (escriba: \`#F${orderNumber} ${sugerencia}\`)\n2️⃣ Redactar su propio mensaje (escriba: \`#F${orderNumber} <su mensaje personalizado>\`)`
+   `💬 *Notificación para el cliente*\nSugerencia automática para el Pedido #${orderNumber}:\n\n"${sugerencia}"\n\nElija una opción:\n1️⃣ Enviar esta sugerencia (responda con: *1*)\n2️⃣ Redactar su propio mensaje (responda con: *2*)`
  );
 }
 
@@ -113,7 +121,7 @@ app.post("/webhook", async (req, res) => {
    const isOwner = ownerPhone && fromPhone.endsWith(ownerPhone.slice(-9));
 
    if (isOwner) {
-     await handleOwnerReply(text);
+     await handleOwnerReply(from, text);
    } else {
      await handleIncomingMessage(from, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId);
    }
@@ -397,13 +405,11 @@ async function sendPaymentInfo(phone, session, bankHolders) {
  await replyAndLog(phone, session, msg);
 
  const orderNumber = await getOrderNumber(session);
- await finalizeOrder(phone, session, "✅ ¡Pedido confirmado! Ya fue enviado a cocina 🍳. Recuerda tener el efectivo listo. ¡Gracias por tu compra! 🍔");
+ await finalizeOrder(phone, session, "✅ ¡Pago confirmado! Tu pedido ya fue enviado a cocina. En breve nos comunicamos si es necesario. ¡Gracias por tu compra! 🍔");
 
  const { botConfig } = await getBusinessConfig();
  if (botConfig.ownerPhone) {
    await sendWhatsAppText(botConfig.ownerPhone, `💵 Pedido #${orderNumber} pagado en EFECTIVO\n\n${buildOrderBreakdownText(phone, session, orderNumber)}`);
-   
-   // 🛠️ AQUÍ SE AÑADE EL AVISO #F TAMBIÉN PARA PAGOS EN EFECTIVO
    await sendComandoFEjemplo(botConfig.ownerPhone, orderNumber, "su pedido está en preparación, toma aproximadamente 20 minutos");
  }
  await clearSession(phone);
@@ -961,9 +967,13 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
  await replyAndLog(phone, session, "Estamos cotizando el valor de tu envío con nuestro motorizado, en un momento te aviso 🛵");
 
  if (ownerPhone) {
+   let ownerSession = await getSession("owner_" + ownerPhone) || { data: {} };
+   ownerSession.data.pendingSuggestion = { orderNumber: code, text: `el costo del envío es $...` };
+   await saveSession("owner_" + ownerPhone, ownerSession);
+
    await sendWhatsAppText(
      ownerPhone,
-     `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo: #${code} <precio>\n(ej: #${code} 3 0 para $3.00)`
+     `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo el precio (ej: \`3.00\`)\no use la opción personalizada.`
    );
  }
 }
@@ -1040,18 +1050,62 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
  }
 }
 
-async function handleOwnerReply(text) {
- const { botConfig } = await getBusinessConfig();
- const ownerPhone = botConfig.ownerPhone;
+// ============ MANEJADOR DE RESPUESTAS DEL DUEÑO ============
+async function handleOwnerReply(ownerPhone, text) {
+ const trimmed = text.trim();
 
- const match = text.trim().match(/^#?([A-Za-z]?\d{1,4})\s+([\s\S]+)$/);
- if (!match) {
-   if (ownerPhone) {
-     await sendWhatsAppText(
-       ownerPhone,
-       "Formato no reconocido.\nPara envío: #<código> <precio>\nPara comprobante: #P<código> ok/no\nPara mensaje: #M<código> <respuesta>\nPara avisar pedido listo: #F<código> <mensaje>"
-     );
+ // Si el dueño está respondiendo a la opción 2 (esperando texto personalizado)
+ let ownerSession = await getSession("owner_" + ownerPhone);
+ if (ownerSession && ownerSession.data && ownerSession.data.awaitingCustomMessage) {
+   const orderNumber = ownerSession.data.awaitingCustomMessage;
+   delete ownerSession.data.awaitingCustomMessage;
+   await saveSession("owner_" + ownerPhone, ownerSession);
+
+   // Envía el mensaje personalizado ingresado por el dueño al cliente
+   await resolveFoodReadyMessage(`F${orderNumber}`, trimmed, ownerPhone);
+   return;
+ }
+
+ // Si el dueño presiona "1" para enviar la sugerencia predeterminada
+ if (trimmed === "1") {
+   if (ownerSession && ownerSession.data && ownerSession.data.pendingSuggestion) {
+     const { orderNumber, text: sugText } = ownerSession.data.pendingSuggestion;
+     
+     delete ownerSession.data.pendingSuggestion;
+     await saveSession("owner_" + ownerPhone, ownerSession);
+
+     await resolveFoodReadyMessage(`F${orderNumber}`, sugText, ownerPhone);
+     return;
+   } else {
+     await sendWhatsAppText(ownerPhone, "No hay ninguna sugerencia pendiente para enviar con '1'.");
+     return;
    }
+ }
+
+ // Si el dueño presiona "2" para redactar su propio mensaje
+ if (trimmed === "2") {
+   if (ownerSession && ownerSession.data && ownerSession.data.pendingSuggestion) {
+     const { orderNumber } = ownerSession.data.pendingSuggestion;
+     
+     // Guardamos que ahora estamos esperando el mensaje personalizado para este pedido
+     ownerSession.data.awaitingCustomMessage = orderNumber;
+     delete ownerSession.data.pendingSuggestion;
+     await saveSession("owner_" + ownerPhone, ownerSession);
+
+     await sendWhatsAppText(ownerPhone, `✍️ Por favor, escriba a continuación el mensaje personalizado que desea enviar para el *Pedido #${orderNumber}*:`);
+     return;
+   } else {
+     await sendWhatsAppText(ownerPhone, "No hay ninguna notificación pendiente para personalizar.");
+     return;
+   }
+ }
+
+ const match = trimmed.match(/^#?([A-Za-z]?\d{1,4})\s+([\s\S]+)$/);
+ if (!match) {
+   await sendWhatsAppText(
+     ownerPhone,
+     "Formato no reconocido.\nPuede responder *1* para enviar la sugerencia o *2* para personalizar.\nO usar comandos:\nPara envío: #<código> <precio>\nPara comprobante: #P<código> ok/no\nPara mensaje: #M<código> <respuesta>\nPara avisar pedido listo: #F<código> <mensaje>"
+   );
    return;
  }
  const code = match[1].toUpperCase();
@@ -1094,7 +1148,7 @@ async function resolveFoodReadyMessage(code, rest, ownerPhone) {
  await replyAndLog(phone, session, `${rest}\n\n¿Deseas responder algo o finalizar la conversación?\n1. Responder\n2. Finalizar conversación`);
  await saveSession(phone, session);
 
- if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Mensaje enviado al cliente del pedido #${orderNum}.`);
+ if (ownerPhone) await sendWhatsAppText(ownerPhone, `✅ Mensaje enviado con éxito al cliente del pedido #${orderNum}.`);
 }
 
 async function resolveOwnerMessage(code, rest, ownerPhone) {
