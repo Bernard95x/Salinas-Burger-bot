@@ -33,20 +33,18 @@ async function sendWhatsAppText(to, body) {
  );
 }
 
-// Memoria temporal para sugerencias del dueño
-const pendingOwnerSuggestions = new Map();
-
+// 🛠️ Muestra el formato claro con #F indicando cómo usar el 1 o el texto propio
 async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
  if (!ownerPhone) return;
- 
- pendingOwnerSuggestions.set(ownerPhone, {
-   orderNumber: orderNumber,
-   text: sugerencia
- });
+
+ // Guardamos temporalmente la sugerencia en una propiedad compartida o la asociamos al pedido si hace falta
+ let ownerSession = await getSession("owner_" + ownerPhone) || { data: {} };
+ ownerSession.data[`sugerencia_${orderNumber}`] = sugerencia;
+ await saveSession("owner_" + ownerPhone, ownerSession);
 
  await sendWhatsAppText(
    ownerPhone,
-   `💬 *Notificación para el cliente*\nSugerencia automática para el Pedido #${orderNumber}:\n\n"${sugerencia}"\n\nElija una opción:\n1️⃣ Enviar esta sugerencia (responda con: *1*)\n2️⃣ Redactar su propio mensaje (responda con: *2*)`
+   `💬 *Notificación para el cliente*\nSugerencia automática para el Pedido #${orderNumber}:\n\n"${sugerencia}"\n\nElija una opción:\n1️⃣ Enviar sugerencia predeterminada: responda \`#F${orderNumber} 1\`\n2️⃣ Redactar mensaje personalizado: responda \`#F${orderNumber} <su mensaje>\``
  );
 }
 
@@ -1048,57 +1046,33 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
  }
 }
 
-// ============ MANEJADOR DE RESPUESTAS DEL DUEÑO ============
+// ============ MANEJADOR DE RESPUESTAS DEL DUEÑO (ACTUALIZADO AL FORMATO #F<pedido> 1 O MENSAJE) ============
 async function handleOwnerReply(ownerPhone, text) {
  const trimmed = text.trim();
 
- let ownerSession = await getSession("owner_" + ownerPhone);
- if (ownerSession && ownerSession.data && ownerSession.data.awaitingCustomMessage) {
-   const orderNumber = ownerSession.data.awaitingCustomMessage;
-   delete ownerSession.data.awaitingCustomMessage;
-   await saveSession("owner_" + ownerPhone, ownerSession);
-
-   await resolveFoodReadyMessage(`F${orderNumber}`, trimmed, ownerPhone);
-   return;
- }
-
- if (trimmed === "1") {
+ // Si el mensaje del dueño empieza con #F seguido de un número y termina en "1" (Ej: #F7 1)
+ const matchSugerencia = trimmed.match(/^#?F(\d{1,4})\s+1$/i);
+ if (matchSugerencia) {
+   const orderNum = matchSugerencia[1];
    const suggestion = pendingOwnerSuggestions.get(ownerPhone);
-   if (suggestion) {
-     const { orderNumber, text: sugText } = suggestion;
+   
+   if (suggestion && String(suggestion.orderNumber) === String(orderNum)) {
      pendingOwnerSuggestions.delete(ownerPhone);
-
-     await resolveFoodReadyMessage(`F${orderNumber}`, sugText, ownerPhone);
+     await resolveFoodReadyMessage(`F${orderNum}`, suggestion.text, ownerPhone);
      return;
    } else {
-     await sendWhatsAppText(ownerPhone, "No hay ninguna sugerencia pendiente en este momento.");
+     // Si por alguna razón la memoria expiró, enviamos el texto por defecto estándar
+     await resolveFoodReadyMessage(`F${orderNum}`, "su pedido está en preparación, toma aproximadamente 20 minutos", ownerPhone);
      return;
    }
  }
 
- if (trimmed === "2") {
-   const suggestion = pendingOwnerSuggestions.get(ownerPhone);
-   if (suggestion) {
-     const { orderNumber } = suggestion;
-     pendingOwnerSuggestions.delete(ownerPhone);
-
-     ownerSession = ownerSession || { data: {} };
-     ownerSession.data.awaitingCustomMessage = orderNumber;
-     await saveSession("owner_" + ownerPhone, ownerSession);
-
-     await sendWhatsAppText(ownerPhone, `✍️ Por favor, escriba a continuación el mensaje personalizado que desea enviar para el *Pedido #${orderNumber}*:`);
-     return;
-   } else {
-     await sendWhatsAppText(ownerPhone, "No hay ninguna notificación pendiente para personalizar.");
-     return;
-   }
- }
-
+ // Comportamiento normal con comandos tradicionales (#P, #M, #F con texto propio)
  const match = trimmed.match(/^#?([A-Za-z]?\d{1,4})\s+([\s\S]+)$/);
  if (!match) {
    await sendWhatsAppText(
      ownerPhone,
-     "Formato no reconocido.\nPuede responder *1* para enviar la sugerencia o *2* para personalizar.\nO usar comandos:\nPara envío: #<código> <precio>\nPara comprobante: #P<código> ok/no\nPara mensaje: #M<código> <respuesta>\nPara avisar pedido listo: #F<código> <mensaje>"
+     "Formato no reconocido.\nPara usar sugerencia automática: *#F<código> 1*\nPara mensaje personalizado: *#F<código> <su mensaje>*"
    );
    return;
  }
@@ -1110,6 +1084,8 @@ async function handleOwnerReply(ownerPhone, text) {
  } else if (code.startsWith("M")) {
    await resolveOwnerMessage(code, rest, ownerPhone);
  } else if (code.startsWith("F")) {
+   // Si escribe #F7 seguido de cualquier texto personalizado, se envía directo
+   pendingOwnerSuggestions.delete(ownerPhone); // Limpiamos la sugerencia pendiente si decide escribir propio
    await resolveFoodReadyMessage(code, rest, ownerPhone);
  } else {
    await resolveDeliveryQuote(code, rest, ownerPhone);
