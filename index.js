@@ -39,7 +39,7 @@ async function sendWhatsAppText(to, body) {
 async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
  if (!ownerPhone) return;
 
- const ref = SESSIONS_COL.doc("owner_" + ownerPhone);
+ const ref = SESSIONS_COL.doc(ownerSessionKey(ownerPhone));
  await db.runTransaction(async (t) => {
    const snap = await t.get(ref);
    const current = snap.exists ? snap.data() : { data: {} };
@@ -58,7 +58,7 @@ async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
 // Lee y borra la sugerencia guardada para ese pedido en una sola transacción atómica,
 // para evitar que otro aviso la sobreescriba justo entre el "leer" y el "borrar".
 async function consumeOwnerSuggestion(ownerPhone, orderNum) {
- const ref = SESSIONS_COL.doc("owner_" + ownerPhone);
+ const ref = SESSIONS_COL.doc(ownerSessionKey(ownerPhone));
  return db.runTransaction(async (t) => {
    const snap = await t.get(ref);
    if (!snap.exists) return null;
@@ -155,6 +155,13 @@ app.post("/webhook", async (req, res) => {
 
 function normalizePhone(p) {
  return (p || "").replace(/\D/g, ""); 
+}
+
+// La clave de la "sesión" del dueño para guardar/leer sugerencias debe ser SIEMPRE la misma,
+// sin importar si el teléfono llega con código de país, con "+", con espacios, o como lo haya
+// escrito el dueño en Ajustes. Usamos los últimos 9 dígitos, igual que la detección de "es el dueño".
+function ownerSessionKey(phone) {
+ return "owner_" + normalizePhone(phone).slice(-9);
 }
 
 // ============ CONFIGURACIÓN DEL NEGOCIO ============
