@@ -965,8 +965,6 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
  await replyAndLog(phone, session, "Estamos cotizando el valor de tu envío con nuestro motorizado, en un momento te aviso 🛵");
 
  if (ownerPhone) {
-   pendingOwnerSuggestions.set(ownerPhone, { orderNumber: code, text: `el costo del envío es $...` });
-
    await sendWhatsAppText(
      ownerPhone,
      `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo el precio (ej: \`3.00\`)`
@@ -1054,17 +1052,18 @@ async function handleOwnerReply(ownerPhone, text) {
  const matchSugerencia = trimmed.match(/^#?F(\d{1,4})\s+1$/i);
  if (matchSugerencia) {
    const orderNum = matchSugerencia[1];
-   const suggestion = pendingOwnerSuggestions.get(ownerPhone);
-   
-   if (suggestion && String(suggestion.orderNumber) === String(orderNum)) {
-     pendingOwnerSuggestions.delete(ownerPhone);
-     await resolveFoodReadyMessage(`F${orderNum}`, suggestion.text, ownerPhone);
-     return;
+   const ownerSession = await getSession("owner_" + ownerPhone);
+   const suggestion = ownerSession?.data?.[`sugerencia_${orderNum}`];
+
+   if (suggestion) {
+     delete ownerSession.data[`sugerencia_${orderNum}`];
+     await saveSession("owner_" + ownerPhone, ownerSession);
+     await resolveFoodReadyMessage(`F${orderNum}`, suggestion, ownerPhone);
    } else {
-     // Si por alguna razón la memoria expiró, enviamos el texto por defecto estándar
+     // Si por alguna razón la sugerencia expiró o no se encontró, enviamos el texto por defecto estándar
      await resolveFoodReadyMessage(`F${orderNum}`, "su pedido está en preparación, toma aproximadamente 20 minutos", ownerPhone);
-     return;
    }
+   return;
  }
 
  // Comportamiento normal con comandos tradicionales (#P, #M, #F con texto propio)
@@ -1084,8 +1083,14 @@ async function handleOwnerReply(ownerPhone, text) {
  } else if (code.startsWith("M")) {
    await resolveOwnerMessage(code, rest, ownerPhone);
  } else if (code.startsWith("F")) {
-   // Si escribe #F7 seguido de cualquier texto personalizado, se envía directo
-   pendingOwnerSuggestions.delete(ownerPhone); // Limpiamos la sugerencia pendiente si decide escribir propio
+   // Si escribe #F7 seguido de cualquier texto personalizado, se envía directo.
+   // Limpiamos la sugerencia pendiente guardada para ese pedido, si decidió escribir la suya propia.
+   const orderNum = code.substring(1);
+   const ownerSession = await getSession("owner_" + ownerPhone);
+   if (ownerSession?.data?.[`sugerencia_${orderNum}`]) {
+     delete ownerSession.data[`sugerencia_${orderNum}`];
+     await saveSession("owner_" + ownerPhone, ownerSession);
+   }
    await resolveFoodReadyMessage(code, rest, ownerPhone);
  } else {
    await resolveDeliveryQuote(code, rest, ownerPhone);
