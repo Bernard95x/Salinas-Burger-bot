@@ -33,16 +33,16 @@ async function sendWhatsAppText(to, body) {
  );
 }
 
-// Envía al dueño la sugerencia formal con las opciones 1 y 2
+// Memoria temporal para sugerencias del dueño
+const pendingOwnerSuggestions = new Map();
+
 async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
  if (!ownerPhone) return;
  
- let ownerSession = await getSession("owner_" + ownerPhone) || { data: {} };
- ownerSession.data.pendingSuggestion = {
+ pendingOwnerSuggestions.set(ownerPhone, {
    orderNumber: orderNumber,
    text: sugerencia
- };
- await saveSession("owner_" + ownerPhone, ownerSession);
+ });
 
  await sendWhatsAppText(
    ownerPhone,
@@ -967,13 +967,11 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
  await replyAndLog(phone, session, "Estamos cotizando el valor de tu envío con nuestro motorizado, en un momento te aviso 🛵");
 
  if (ownerPhone) {
-   let ownerSession = await getSession("owner_" + ownerPhone) || { data: {} };
-   ownerSession.data.pendingSuggestion = { orderNumber: code, text: `el costo del envío es $...` };
-   await saveSession("owner_" + ownerPhone, ownerSession);
+   pendingOwnerSuggestions.set(ownerPhone, { orderNumber: code, text: `el costo del envío es $...` });
 
    await sendWhatsAppText(
      ownerPhone,
-     `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo el precio (ej: \`3.00\`)\no use la opción personalizada.`
+     `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo el precio (ej: \`3.00\`)`
    );
  }
 }
@@ -1054,42 +1052,38 @@ async function requestPaymentApproval(phone, session, botConfig, mediaId) {
 async function handleOwnerReply(ownerPhone, text) {
  const trimmed = text.trim();
 
- // Si el dueño está respondiendo a la opción 2 (esperando texto personalizado)
  let ownerSession = await getSession("owner_" + ownerPhone);
  if (ownerSession && ownerSession.data && ownerSession.data.awaitingCustomMessage) {
    const orderNumber = ownerSession.data.awaitingCustomMessage;
    delete ownerSession.data.awaitingCustomMessage;
    await saveSession("owner_" + ownerPhone, ownerSession);
 
-   // Envía el mensaje personalizado ingresado por el dueño al cliente
    await resolveFoodReadyMessage(`F${orderNumber}`, trimmed, ownerPhone);
    return;
  }
 
- // Si el dueño presiona "1" para enviar la sugerencia predeterminada
  if (trimmed === "1") {
-   if (ownerSession && ownerSession.data && ownerSession.data.pendingSuggestion) {
-     const { orderNumber, text: sugText } = ownerSession.data.pendingSuggestion;
-     
-     delete ownerSession.data.pendingSuggestion;
-     await saveSession("owner_" + ownerPhone, ownerSession);
+   const suggestion = pendingOwnerSuggestions.get(ownerPhone);
+   if (suggestion) {
+     const { orderNumber, text: sugText } = suggestion;
+     pendingOwnerSuggestions.delete(ownerPhone);
 
      await resolveFoodReadyMessage(`F${orderNumber}`, sugText, ownerPhone);
      return;
    } else {
-     await sendWhatsAppText(ownerPhone, "No hay ninguna sugerencia pendiente para enviar con '1'.");
+     await sendWhatsAppText(ownerPhone, "No hay ninguna sugerencia pendiente en este momento.");
      return;
    }
  }
 
- // Si el dueño presiona "2" para redactar su propio mensaje
  if (trimmed === "2") {
-   if (ownerSession && ownerSession.data && ownerSession.data.pendingSuggestion) {
-     const { orderNumber } = ownerSession.data.pendingSuggestion;
-     
-     // Guardamos que ahora estamos esperando el mensaje personalizado para este pedido
+   const suggestion = pendingOwnerSuggestions.get(ownerPhone);
+   if (suggestion) {
+     const { orderNumber } = suggestion;
+     pendingOwnerSuggestions.delete(ownerPhone);
+
+     ownerSession = ownerSession || { data: {} };
      ownerSession.data.awaitingCustomMessage = orderNumber;
-     delete ownerSession.data.pendingSuggestion;
      await saveSession("owner_" + ownerPhone, ownerSession);
 
      await sendWhatsAppText(ownerPhone, `✍️ Por favor, escriba a continuación el mensaje personalizado que desea enviar para el *Pedido #${orderNumber}*:`);
