@@ -36,9 +36,6 @@ async function sendWhatsAppText(to, body) {
 // Envía al dueño la sugerencia formal con las opciones 1 y 2
 async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
   if (!ownerPhone) return;
-  
-  // Guardamos temporalmente la sugerencia en la sesión del dueño o en una colección si se desea, 
-  // o se presenta de forma clara para que elija.
   await sendWhatsAppText(
     ownerPhone,
     `💬 *Notificación para el cliente*\nSugerencia automática para el Pedido #${orderNumber}:\n\n"${sugerencia}"\n\nElija una opción:\n1️⃣ Enviar esta sugerencia (escriba: \`#F${orderNumber} ${sugerencia}\`)\n2️⃣ Redactar su propio mensaje (escriba: \`#F${orderNumber} <su mensaje personalizado>\`)`
@@ -400,11 +397,14 @@ async function sendPaymentInfo(phone, session, bankHolders) {
   await replyAndLog(phone, session, msg);
 
   const orderNumber = await getOrderNumber(session);
-  await finalizeOrder(phone, session, "✅ ¡Pago confirmado! Tu pedido ya fue enviado a cocina. En breve nos comunicamos si es necesario. ¡Gracias por tu compra! 🍔");
+  await finalizeOrder(phone, session, "✅ ¡Pedido confirmado! Ya fue enviado a cocina 🍳. Recuerda tener el efectivo listo. ¡Gracias por tu compra! 🍔");
 
   const { botConfig } = await getBusinessConfig();
   if (botConfig.ownerPhone) {
     await sendWhatsAppText(botConfig.ownerPhone, `💵 Pedido #${orderNumber} pagado en EFECTIVO\n\n${buildOrderBreakdownText(phone, session, orderNumber)}`);
+    
+    // 🛠️ AQUÍ SE AÑADE EL AVISO #F TAMBIÉN PARA PAGOS EN EFECTIVO
+    await sendComandoFEjemplo(botConfig.ownerPhone, orderNumber, "su pedido está en preparación, toma aproximadamente 20 minutos");
   }
   await clearSession(phone);
   return true;
@@ -507,5 +507,4 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
           await replyAndLog(
             phone,
             session,
-            `${botConfig.soldOutMsg || `Lo sentimos, "${match.name}" no está disponible por ahora.`}\n\n${
-              su
+            `${botConfig.soldOutMsg || `Lo sentimos, "${match.name}" no está dispon
