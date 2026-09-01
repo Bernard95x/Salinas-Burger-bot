@@ -33,19 +33,44 @@ async function sendWhatsAppText(to, body) {
  );
 }
 
-// 🛠️ Muestra el formato claro con #F indicando cómo usar el 1 o el texto propio
+// 🛠️ Muestra el formato claro con #F indicando cómo usar el 1 o el texto propio.
+// Usa una transacción de Firestore para que, si dos avisos llegan casi al mismo tiempo
+// (ej: confirmar pedido + marcar "listo para retiro" muy seguido), no se pisen entre sí.
 async function sendComandoFEjemplo(ownerPhone, orderNumber, sugerencia) {
  if (!ownerPhone) return;
 
- // Guardamos temporalmente la sugerencia en una propiedad compartida o la asociamos al pedido si hace falta
- let ownerSession = await getSession("owner_" + ownerPhone) || { data: {} };
- ownerSession.data[`sugerencia_${orderNumber}`] = sugerencia;
- await saveSession("owner_" + ownerPhone, ownerSession);
+ const ref = SESSIONS_COL.doc("owner_" + ownerPhone);
+ await db.runTransaction(async (t) => {
+   const snap = await t.get(ref);
+   const current = snap.exists ? snap.data() : { data: {} };
+   if (!current.data) current.data = {};
+   current.data[`sugerencia_${orderNumber}`] = sugerencia;
+   current.lastInteraction = Date.now();
+   t.set(ref, current);
+ });
 
  await sendWhatsAppText(
    ownerPhone,
    `💬 *Notificación para el cliente*\nSugerencia automática para el Pedido #${orderNumber}:\n\n"${sugerencia}"\n\nElija una opción:\n1️⃣ Enviar sugerencia predeterminada: responda \`#F${orderNumber} 1\`\n2️⃣ Redactar mensaje personalizado: responda \`#F${orderNumber} <su mensaje>\``
  );
+}
+
+// Lee y borra la sugerencia guardada para ese pedido en una sola transacción atómica,
+// para evitar que otro aviso la sobreescriba justo entre el "leer" y el "borrar".
+async function consumeOwnerSuggestion(ownerPhone, orderNum) {
+ const ref = SESSIONS_COL.doc("owner_" + ownerPhone);
+ return db.runTransaction(async (t) => {
+   const snap = await t.get(ref);
+   if (!snap.exists) return null;
+   const current = snap.data();
+   const key = `sugerencia_${orderNum}`;
+   const value = current.data?.[key];
+   if (value === undefined) return null;
+   delete current.data[key];
+   current.lastInteraction = Date.now();
+   t.set(ref, current);
+   return value;
+ });
 }
 
 async function sendWhatsAppDocument(to, link, filename) {
@@ -1052,12 +1077,9 @@ async function handleOwnerReply(ownerPhone, text) {
  const matchSugerencia = trimmed.match(/^#?F(\d{1,4})\s+1$/i);
  if (matchSugerencia) {
    const orderNum = matchSugerencia[1];
-   const ownerSession = await getSession("owner_" + ownerPhone);
-   const suggestion = ownerSession?.data?.[`sugerencia_${orderNum}`];
+   const suggestion = await consumeOwnerSuggestion(ownerPhone, orderNum);
 
    if (suggestion) {
-     delete ownerSession.data[`sugerencia_${orderNum}`];
-     await saveSession("owner_" + ownerPhone, ownerSession);
      await resolveFoodReadyMessage(`F${orderNum}`, suggestion, ownerPhone);
    } else {
      // Si por alguna razón la sugerencia expiró o no se encontró, enviamos el texto por defecto estándar
@@ -1084,13 +1106,8 @@ async function handleOwnerReply(ownerPhone, text) {
    await resolveOwnerMessage(code, rest, ownerPhone);
  } else if (code.startsWith("F")) {
    // Si escribe #F7 seguido de cualquier texto personalizado, se envía directo.
-   // Limpiamos la sugerencia pendiente guardada para ese pedido, si decidió escribir la suya propia.
-   const orderNum = code.substring(1);
-   const ownerSession = await getSession("owner_" + ownerPhone);
-   if (ownerSession?.data?.[`sugerencia_${orderNum}`]) {
-     delete ownerSession.data[`sugerencia_${orderNum}`];
-     await saveSession("owner_" + ownerPhone, ownerSession);
-   }
+   // Limpiamos (atómicamente) la sugerencia pendiente guardada para ese pedido, si decidió escribir la suya propia.
+   await consumeOwnerSuggestion(ownerPhone, code.substring(1));
    await resolveFoodReadyMessage(code, rest, ownerPhone);
  } else {
    await resolveDeliveryQuote(code, rest, ownerPhone);
