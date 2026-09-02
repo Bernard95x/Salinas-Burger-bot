@@ -1032,8 +1032,9 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
  if (ownerPhone) {
    await sendWhatsAppText(
      ownerPhone,
-     `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\nDirección: ${direccionOUbicacion}\n\nResponde escribiendo el precio (ej: \`3.00\`)`
+     `🛵 Nueva cotización de envío\nPedido #${code}\nCliente: ${phone}\n\nResponde escribiendo el precio (ej: \`#${code} 3.00\`)`
    );
+   await sendWhatsAppText(ownerPhone, direccionOUbicacion);
  }
 }
 
