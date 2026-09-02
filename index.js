@@ -1030,15 +1030,13 @@ async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicaci
  await replyAndLog(phone, session, "Estamos cotizando el valor de tu envío con nuestro motorizado, en un momento te aviso 🛵");
 
  if (ownerPhone) {
-   // 1er Mensaje: Instrucciones y datos del cliente
    await sendWhatsAppText(
      ownerPhone,
      `Nueva cotizacion de envio\nPedido #${code}\nCliente: ${phone}\nResponde escribiendo el precio (ej: #${code} 3.00)`
    );
-   // 2do Mensaje: Únicamente la dirección o link GPS
    await sendWhatsAppText(
      ownerPhone,
-     `${direccionOUbicacion}`
+     direccionOUbicacion
    );
  }
 }
