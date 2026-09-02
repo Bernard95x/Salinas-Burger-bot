@@ -214,6 +214,47 @@ function formatBankAccountsForChat(holders) {
    .join("");
 }
 
+// Evalúa si el momento actual (hora de Ecuador) cae dentro del horario semanal configurado
+// en botConfig.horario. Si no hay horario configurado, no restringe nada (deja pasar todo,
+// igual que el comportamiento previo).
+const MAPA_DIA_SEMANA = {
+ Sunday: "domingo", Monday: "lunes", Tuesday: "martes", Wednesday: "miercoles",
+ Thursday: "jueves", Friday: "viernes", Saturday: "sabado",
+};
+
+function estaDentroDelHorario(botConfig) {
+ const horario = botConfig?.horario;
+ if (!horario || !horario.dias) return true;
+
+ const partes = new Intl.DateTimeFormat("en-US", {
+   timeZone: "America/Guayaquil",
+   weekday: "long",
+   hour: "2-digit",
+   minute: "2-digit",
+   hour12: false,
+ }).formatToParts(new Date());
+
+ const weekdayEn = partes.find((p) => p.type === "weekday")?.value || "";
+ const hora = parseInt(partes.find((p) => p.type === "hour")?.value || "0", 10);
+ const minuto = parseInt(partes.find((p) => p.type === "minute")?.value || "0", 10);
+
+ const diaKey = MAPA_DIA_SEMANA[weekdayEn];
+ const configDia = horario.dias[diaKey];
+ if (!configDia || !configDia.activo) return false;
+
+ const minutosActuales = hora * 60 + minuto;
+ const [hA, mA] = (configDia.apertura || "00:00").split(":").map(Number);
+ const [hC, mC] = (configDia.cierre || "23:59").split(":").map(Number);
+ const minutosApertura = hA * 60 + (mA || 0);
+ const minutosCierre = hC * 60 + (mC || 0);
+
+ if (minutosCierre >= minutosApertura) {
+   return minutosActuales >= minutosApertura && minutosActuales <= minutosCierre;
+ }
+ // Horario que cruza medianoche (ej: 20:00 - 02:00)
+ return minutosActuales >= minutosApertura || minutosActuales <= minutosCierre;
+}
+
 function normalizeText(t) {
  return (t || "")
    .normalize("NFD")
@@ -477,7 +518,15 @@ async function sendPaymentInfo(phone, session, bankHolders) {
 
 async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId, locationCoords) {
  const { menuItems, botConfig, bankHolders } = await getBusinessConfig();
- 
+
+ if (!estaDentroDelHorario(botConfig)) {
+   const textoHorario = botConfig?.horario?.textoHorario || "consulta nuestro horario de atención";
+   const plantilla = botConfig?.horario?.outOfScheduleMsg ||
+     "Hola 👋. Disculpa, en este momento no estamos disponibles. Nuestro horario de atención es {texto_horario}";
+   await sendWhatsAppText(phone, plantilla.replace("{texto_horario}", textoHorario));
+   return;
+ }
+
  if (text.toLowerCase() === "reiniciar" || text.toLowerCase() === "cancelar") {
    await clearSession(phone);
    await sendWhatsAppText(phone, "✅ Tu pedido anterior ha sido cancelado. Envía cualquier mensaje (como 'Hola') para empezar uno nuevo 🍔");
