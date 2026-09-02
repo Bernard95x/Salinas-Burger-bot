@@ -134,6 +134,9 @@ app.post("/webhook", async (req, res) => {
    const locationLink = isLocation
      ? `https://www.google.com/maps?q=${message.location.latitude},${message.location.longitude}`
      : null;
+   const locationCoords = isLocation
+     ? { lat: message.location.latitude, lng: message.location.longitude }
+     : null;
 
    console.log(`📩 [${from}] ${isImage ? "(imagen)" : isLocation ? "(ubicación)" : isOrder ? "(carrito)" : text}`);
 
@@ -146,7 +149,7 @@ app.post("/webhook", async (req, res) => {
    if (isOwner) {
      await handleOwnerReply(from, text);
    } else {
-     await handleIncomingMessage(from, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId);
+     await handleIncomingMessage(from, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId, locationCoords);
    }
  } catch (err) {
    console.error("⚠️ Error procesando el webhook:", err.response?.data || err.message);
@@ -162,6 +165,30 @@ function normalizePhone(p) {
 // escrito el dueño en Ajustes. Usamos los últimos 9 dígitos, igual que la detección de "es el dueño".
 function ownerSessionKey(phone) {
  return "owner_" + normalizePhone(phone).slice(-9);
+}
+
+// Distancia en línea recta entre dos coordenadas (fórmula Haversine), en kilómetros.
+function distanciaKm(lat1, lng1, lat2, lng2) {
+ const toRad = (deg) => (deg * Math.PI) / 180;
+ const R = 6371; // radio de la Tierra en km
+ const dLat = toRad(lat2 - lat1);
+ const dLng = toRad(lng2 - lng1);
+ const a =
+   Math.sin(dLat / 2) ** 2 +
+   Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+ const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+ return R * c;
+}
+
+// Estima los minutos de viaje del motorizado según la distancia en línea recta al local.
+// Es un ESTIMADO (no ruta real por calles): asume una velocidad promedio de moto en ciudad,
+// más un pequeño margen fijo (semáforos, empacar, arrancar), con un mínimo razonable.
+function estimarMinutosEnvio(storeLat, storeLng, clientLat, clientLng) {
+ const VELOCIDAD_PROMEDIO_KMH = 28;
+ const MARGEN_FIJO_MIN = 4;
+ const km = distanciaKm(storeLat, storeLng, clientLat, clientLng);
+ const minutosViaje = (km / VELOCIDAD_PROMEDIO_KMH) * 60;
+ return Math.max(6, Math.round(minutosViaje + MARGEN_FIJO_MIN));
 }
 
 // ============ CONFIGURACIÓN DEL NEGOCIO ============
@@ -448,7 +475,7 @@ async function sendPaymentInfo(phone, session, bankHolders) {
 
 // ============ CONVERSACIÓN CON EL CLIENTE ============
 
-async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId) {
+async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, orderData, locationLink, mediaId, locationCoords) {
  const { menuItems, botConfig, bankHolders } = await getBusinessConfig();
  
  if (text.toLowerCase() === "reiniciar" || text.toLowerCase() === "cancelar") {
@@ -913,7 +940,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
    if (text === "1" || isLocation) {
      session.data.deliveryType = "domicilio";
      if (isLocation) {
-       await requestDeliveryQuote(phone, session, botConfig, locationLink);
+       await requestDeliveryQuote(phone, session, botConfig, locationLink, locationCoords);
      } else {
        session.step = "address";
        await replyAndLog(phone, session, "Perfecto, ¿cuál es tu dirección o sector de entrega? (o comparte tu ubicación de WhatsApp 📍)");
@@ -934,7 +961,7 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
 
  if (session.step === "address") {
    const address = isLocation ? locationLink : text;
-   await requestDeliveryQuote(phone, session, botConfig, address);
+   await requestDeliveryQuote(phone, session, botConfig, address, isLocation ? locationCoords : null);
    await saveSession(phone, session);
    return;
  }
@@ -979,13 +1006,19 @@ async function handleIncomingMessage(phone, text, isImage, isLocation, isOrder, 
  }
 }
 
-async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicacion) {
+async function requestDeliveryQuote(phone, session, botConfig, direccionOUbicacion, clientCoords = null) {
  const ownerPhone = botConfig.ownerPhone;
  const orderNumber = await getOrderNumber(session);
  const code = String(orderNumber);
 
  session.data.address = direccionOUbicacion;
  session.step = "awaiting_delivery_price";
+
+ const storeLat = parseFloat(botConfig.storeLat);
+ const storeLng = parseFloat(botConfig.storeLng);
+ if (clientCoords && !isNaN(storeLat) && !isNaN(storeLng)) {
+   session.data.estimatedTravelMinutes = estimarMinutosEnvio(storeLat, storeLng, clientCoords.lat, clientCoords.lng);
+ }
 
  await QUOTES_COL.doc(code).set({
    phone,
@@ -1272,7 +1305,7 @@ async function finalizeOrder(phone, session, confirmMsg = "✅ ¡Pago confirmado
    status: "process",
    startTime: Date.now(),
    dispatchTime: null,
-   estimatedTravelMinutes: 10,
+   estimatedTravelMinutes: session.data.estimatedTravelMinutes || 10,
    date: new Date().toISOString().split("T")[0],
    chatHistory: session.chatHistory,
    source: "whatsapp_bot",
